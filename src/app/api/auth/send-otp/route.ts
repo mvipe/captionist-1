@@ -5,11 +5,13 @@ import { COLLECTIONS } from '@/lib/collections';
 
 export async function POST(req: NextRequest) {
   try {
-    // Read the raw body first so we can inspect it if JSON parsing fails
-    const raw = await req.text();
+    // Read the raw body first so we can sanitize it before parsing
+    let raw = await req.text();
+
+    // Strip a leading BOM / zero-width chars that some browser extensions inject
+    raw = raw.replace(/^\uFEFF/, '').replace(/^\u200B/, '').trim();
 
     if (!raw) {
-      console.error('[send-otp] empty body. content-type:', req.headers.get('content-type'));
       return NextResponse.json({ error: 'Empty request body' }, { status: 400 });
     }
 
