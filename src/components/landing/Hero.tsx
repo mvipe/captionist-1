@@ -29,7 +29,7 @@ export default function Hero() {
               <Star key={i} size={16} className="fill-amber-400 text-amber-400" />
             ))}
             <span className="ml-1 font-semibold">4.9</span>
-            <span style={{ color: 'var(--text-muted)' }}>G</span>
+            <span className="text-sm" style={{ color: 'var(--text-muted)' }}>/5 on Google</span>
           </div>
         </div>
       </div>

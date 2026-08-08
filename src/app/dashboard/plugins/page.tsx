@@ -39,7 +39,7 @@ export default function PluginsPage() {
       <div>
         <h1 className="text-3xl font-extrabold">Manage Plugins</h1>
         <p className="mt-2 text-sm" style={{ color: 'var(--text-muted)' }}>
-          Install Captionist extensions for your favourite editor and keep captions perfectly in sync.
+          Install YesEditor extensions for your favourite editor and keep captions perfectly in sync.
         </p>
       </div>
 

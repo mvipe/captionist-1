@@ -30,7 +30,7 @@ export default function HelpPage() {
         <a href="/dashboard/tutorials" className="surface flex flex-col gap-2 p-6 transition hover:opacity-90">
           <BookOpen size={22} style={{ color: 'var(--accent)' }} />
           <h3 className="font-bold">Tutorials</h3>
-          <p className="text-sm" style={{ color: 'var(--text-muted)' }}>Watch step-by-step guides in Captionist Academy.</p>
+          <p className="text-sm" style={{ color: 'var(--text-muted)' }}>Watch step-by-step guides in YesEditor Academy.</p>
         </a>
       </div>
 

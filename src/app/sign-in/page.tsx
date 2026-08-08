@@ -66,7 +66,7 @@ export default function SignInPage() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error);
       await signInWithToken(data.customToken);
-      toast.success('Welcome to Captionist');
+      toast.success('Welcome to YesEditor');
       go();
     } catch (e: any) {
       toast.error(e?.message || 'Verification failed');

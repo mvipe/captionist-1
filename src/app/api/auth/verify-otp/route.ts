@@ -7,32 +7,7 @@ import type { UserRecord } from 'firebase-admin/auth';
 
 export async function POST(req: NextRequest) {
   try {
-    // Read the raw body first so we can sanitize it before parsing
-    let raw = await req.text();
-
-    // Strip a leading BOM / zero-width chars that some browser extensions inject
-    raw = raw.replace(/^\uFEFF/, '').replace(/^\u200B/, '').trim();
-
-    if (!raw) {
-      return NextResponse.json({ error: 'Empty request body' }, { status: 400 });
-    }
-
-    let body: {
-      phone?: string;
-      otp?: string;
-      mode?: string;
-      name?: string;
-      email?: string;
-      password?: string;
-    };
-    try {
-      body = JSON.parse(raw);
-    } catch {
-      console.error('[verify-otp] malformed body:', JSON.stringify(raw.slice(0, 300)));
-      return NextResponse.json({ error: 'Malformed request body' }, { status: 400 });
-    }
-
-    const { phone, otp, mode, name, email, password } = body;
+    const { phone, otp, mode, name, email, password } = await req.json();
     if (!phone || !otp) {
       return NextResponse.json({ error: 'phone and otp required' }, { status: 400 });
     }

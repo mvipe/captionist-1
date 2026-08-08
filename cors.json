@@ -1,6 +1,14 @@
 [
   {
+<<<<<<< HEAD
+    "origin": [
+      "http://localhost:3000",
+      "https://captionist-beta.vercel.app",
+      "https://*.vercel.app"
+    ],
+=======
     "origin": ["http://localhost:3000", "https://captionist-beta.vercel.app"],
+>>>>>>> 766c5280283242873930da4eb69b60d46a2c8850
     "method": ["GET", "HEAD"],
     "responseHeader": ["Content-Type", "Content-Range", "Accept-Ranges", "Range"],
     "maxAgeSeconds": 3600

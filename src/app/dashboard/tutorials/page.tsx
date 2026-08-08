@@ -23,12 +23,12 @@ export default function TutorialsPage() {
       <div className="grid items-center gap-8 lg:grid-cols-2">
         <div>
           <h1 className="text-6xl font-extrabold leading-[0.95] tracking-tight">
-            <span style={{ color: 'var(--text)' }}>Captionist</span>
+            <span style={{ color: 'var(--text)' }}>YesEditor</span>
             <br />
             <span className="gradient-text">Academy</span>
           </h1>
           <p className="mt-6 text-lg" style={{ color: 'var(--text-muted)' }}>
-            Learn to use Captionist from the most Famous Editor of South Asia & Founder of Editing Skool
+            Learn to use YesEditor from the most Famous Editor of South Asia & Founder of Editing Skool
           </p>
         </div>
         <div className="surface relative aspect-video overflow-hidden" style={{ background: 'var(--bg-soft)' }}>

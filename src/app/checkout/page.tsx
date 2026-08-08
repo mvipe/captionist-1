@@ -103,7 +103,7 @@ function CheckoutInner() {
         key: order.keyId,
         amount: Math.round(order.amount * 100),
         currency: order.currency,
-        name: 'Captionist',
+        name: 'YesEditor',
         description: `${plan.name} · ${billing}`,
         order_id: order.orderId,
         prefill: { name: user?.name, email: user?.email, contact: user?.phone },

@@ -5,7 +5,7 @@ import { AuthProvider } from '@/context/AuthContext';
 import { Toaster } from 'react-hot-toast';
 
 export const metadata: Metadata = {
-  title: 'Captionist — Captioning Software, Made by Desi Creators, For Desi Creators',
+  title: 'YesEditor — Captioning Software, Made by Desi Creators, For Desi Creators',
   description: 'Auto-generate accurate captions in all major desi languages in seconds.',
 };
 

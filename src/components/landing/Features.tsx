@@ -13,7 +13,7 @@ export function AudioEnhance() {
             <span className="gradient-text">Audio Enhancement!</span>
           </h2>
           <p className="mt-6 leading-relaxed" style={{ color: 'var(--text-muted)' }}>
-            <strong style={{ color: 'var(--text)' }}>Captionist</strong> offers{' '}
+            <strong style={{ color: 'var(--text)' }}>YesEditor</strong> offers{' '}
             <strong style={{ color: 'var(--text)' }}>Studio Grade Audio Enhancement</strong> using complex{' '}
             <strong style={{ color: 'var(--text)' }}>Algorithms &amp; AI.</strong> Tested for multiple scenarios
             including harsh traffic, white noise, crowds, hiss or any other form of noise pattern.
