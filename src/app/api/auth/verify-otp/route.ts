@@ -3,18 +3,46 @@ import { verifyOtp, normalizeMobile } from '@/lib/msg91';
 import { adminAuth, adminDb } from '@/lib/firebaseAdmin';
 import { COLLECTIONS } from '@/lib/collections';
 import { newUserDoc, isAdminIdentity } from '@/lib/userDoc';
+import { errorResponse } from '@/lib/apiError';
 import type { UserRecord } from 'firebase-admin/auth';
+
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
 
 export async function POST(req: NextRequest) {
   try {
-    const { phone, otp, mode, name, email, password } = await req.json();
+    let body: {
+      phone?: string;
+      otp?: string;
+      mode?: string;
+      name?: string;
+      email?: string;
+      password?: string;
+    };
+    try {
+      body = await req.json();
+    } catch {
+      return NextResponse.json({ error: 'Invalid request body', code: 'BAD_REQUEST' }, { status: 400 });
+    }
+
+    const { phone, otp, mode, name, email, password } = body;
     if (!phone || !otp) {
-      return NextResponse.json({ error: 'phone and otp required' }, { status: 400 });
+      return NextResponse.json({ error: 'phone and otp required', code: 'BAD_REQUEST' }, { status: 400 });
     }
 
     const verification = await verifyOtp(phone, otp);
     if (!verification.success) {
-      return NextResponse.json({ error: verification.message }, { status: 401 });
+      const isConfig =
+        verification.code === 'MSG91_AUTH_KEY_MISSING' ||
+        verification.code === 'MSG91_TEMPLATE_MISSING';
+      const isNetwork = verification.code === 'MSG91_TIMEOUT' || verification.code === 'MSG91_NETWORK';
+      if (isConfig || isNetwork) {
+        console.error(`[verify-otp] MSG91 failure [${verification.code}]: ${verification.message}`);
+      }
+      return NextResponse.json(
+        { error: verification.message, code: verification.code, configError: isConfig },
+        { status: isConfig ? 503 : isNetwork ? 502 : 401 }
+      );
     }
 
     const normalized = '+' + normalizeMobile(phone);
@@ -123,8 +151,7 @@ export async function POST(req: NextRequest) {
 
     const customToken = await adminAuth.createCustomToken(uid);
     return NextResponse.json({ success: true, customToken, uid });
-  } catch (e: any) {
-    console.error('[verify-otp] error:', e);
-    return NextResponse.json({ error: e?.message || 'Verification failed' }, { status: 500 });
+  } catch (e) {
+    return errorResponse(e, '[verify-otp]', 'Verification failed');
   }
 }

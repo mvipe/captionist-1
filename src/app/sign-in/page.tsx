@@ -31,6 +31,36 @@ export default function SignInPage() {
 
   const go = () => router.push('/dashboard');
 
+  /**
+   * Read an API response safely. A misconfigured server can answer with an HTML
+   * error page instead of JSON — `res.json()` then throws and the real status
+   * is lost, which is how a server-side 500 reached the user as a meaningless
+   * "Failed to fetch".
+   */
+  const readJson = async (res: Response): Promise<any> => {
+    const text = await res.text();
+    try {
+      return text ? JSON.parse(text) : {};
+    } catch {
+      return { error: `Server returned ${res.status} ${res.statusText}`, nonJson: true };
+    }
+  };
+
+  /** Turn a failed response into an error the user can actually act on. */
+  const apiError = (res: Response, data: any, fallback: string) => {
+    if (data?.configError || res.status === 503) {
+      // Server misconfiguration — log it distinctly so it can't be mistaken
+      // for the browser-extension noise in the console.
+      console.error(`[auth] server configuration error [${data?.code}]: ${data?.error}`);
+      return new Error(
+        data?.error
+          ? `Server not configured: ${data.error}`
+          : 'The server is not configured for OTP yet. Please contact support.'
+      );
+    }
+    return new Error(data?.error || `${fallback} (HTTP ${res.status})`);
+  };
+
   const sendOtp = async () => {
     if (!phone) return toast.error('Enter your phone number');
     setLoading(true);
@@ -40,15 +70,15 @@ export default function SignInPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ phone, mode }),
       });
-      const data = await res.json();
+      const data = await readJson(res);
       if (!res.ok) {
         if (data.wrongMode) setMode(mode === 'login' ? 'signup' : 'login');
-        throw new Error(data.error);
+        throw apiError(res, data, 'Failed to send OTP');
       }
       setOtpSent(true);
       toast.success('OTP sent');
     } catch (e: any) {
-      toast.error(e?.message || 'Failed to send OTP');
+      toast.error(e?.message || 'Failed to send OTP', { duration: 6000 });
     } finally {
       setLoading(false);
     }
@@ -63,13 +93,13 @@ export default function SignInPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ phone, otp, mode, name, email, password }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error);
+      const data = await readJson(res);
+      if (!res.ok) throw apiError(res, data, 'Verification failed');
       await signInWithToken(data.customToken);
       toast.success('Welcome to YesEditor');
       go();
     } catch (e: any) {
-      toast.error(e?.message || 'Verification failed');
+      toast.error(e?.message || 'Verification failed', { duration: 6000 });
     } finally {
       setLoading(false);
     }
