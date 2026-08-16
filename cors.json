@@ -4,7 +4,8 @@
     "origin": [
       "http://localhost:3000",
       "https://captionist-beta.vercel.app",
-      "https://*.vercel.app"
+      "https://*.vercel.app",
+      "https://yeseditor.com/"
     ],
 =======
     "origin": ["http://localhost:3000", "https://captionist-beta.vercel.app"],
