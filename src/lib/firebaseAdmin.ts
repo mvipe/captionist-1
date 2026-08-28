@@ -95,87 +95,29 @@ function stripWrappingQuotes(s: string): string {
   return t;
 }
 
-/**
- * Undo one level of quote-escaping: `{\"type\":\"service_account\"}`.
- * Happens when the JSON is pasted into a field that stores it as a quoted
- * string (some panels, JSON-encoded config files, double-stringified values).
- * Left alone, `JSON.parse` fails at position 1 — right after the `{`.
- */
-function unescapeQuotes(s: string): string {
-  return s.replace(/\\"/g, '"');
-}
-
-/**
- * Convert a Python/JS-style single-quoted object literal into JSON.
- * A service-account key contains no apostrophes in any value, so a blanket
- * swap is safe here — and this only ever runs as a last-resort repair.
- */
-function singleQuotedToJson(s: string): string {
-  return s.replace(/'/g, '"');
-}
-
-/**
- * Describe *how* the value is malformed, without ever echoing it back.
- * Only structural facts — no substring of the secret is included.
- */
-function diagnoseMalformedJson(s: string): string {
-  const body = stripWrappingQuotes(s);
-  if (body.includes('\\"')) {
-    return (
-      'The quotes in the value are backslash-escaped (it looks like {\\"type\\":...}), ' +
-      'so it is a JSON *string* rather than a JSON object. The value was probably ' +
-      'copied out of a field that had already encoded it once.'
-    );
-  }
-  if (/^\{\s*'/.test(body)) {
-    return 'The value uses single quotes instead of double quotes, which is not valid JSON.';
-  }
-  if (/^\{\s*[A-Za-z_]/.test(body)) {
-    return 'The property names in the value are unquoted, which is not valid JSON.';
-  }
-  if (/"[^"]*\n[^"]*"/.test(body)) {
-    return 'The value contains real line breaks inside a string — the private key newlines were mangled in transit.';
-  }
-  if (!body.startsWith('{')) {
-    return 'The value does not start with "{", so it is not a service-account JSON object at all.';
-  }
-  return 'The value is not valid JSON.';
-}
-
 function parseServiceAccountJson(raw: string, source: string): Record<string, string> {
-  const stripped = stripWrappingQuotes(raw);
-
-  // Repair attempts, cheapest and least invasive first. Each is only reached
-  // if every earlier one failed to parse.
   const attempts = [
     raw,
-    stripped,
-    escapeControlCharsInStrings(stripped),
-    unescapeQuotes(stripped),
-    escapeControlCharsInStrings(unescapeQuotes(stripped)),
-    escapeControlCharsInStrings(singleQuotedToJson(stripped)),
+    stripWrappingQuotes(raw),
+    escapeControlCharsInStrings(stripWrappingQuotes(raw)),
   ];
 
-  // Report the FIRST failure — it describes the value as supplied, which is
-  // what the operator actually needs to know. Later messages describe repaired
-  // variants and are misleading.
-  let firstMessage = '';
+  let lastMessage = 'unknown parse error';
   for (const candidate of attempts) {
     try {
       const parsed = JSON.parse(candidate);
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed;
+      if (parsed && typeof parsed === 'object') return parsed;
     } catch (e) {
-      if (!firstMessage) firstMessage = (e as Error).message;
+      lastMessage = (e as Error).message;
     }
   }
 
   throw new ConfigError(
     'FIREBASE_SERVICE_ACCOUNT_INVALID_JSON',
-    `${source} is set but could not be parsed as JSON (${firstMessage || 'unknown parse error'}). ` +
-      `${diagnoseMalformedJson(raw)} ` +
-      'Fix: set FIREBASE_SERVICE_ACCOUNT_B64 instead — it has no quotes or newlines to corrupt. ' +
-      'Generate it with:  base64 -w0 serviceAccount.json  (PowerShell: ' +
-      '[Convert]::ToBase64String([IO.File]::ReadAllBytes("serviceAccount.json")))'
+    `${source} is set but could not be parsed as JSON (${lastMessage}). ` +
+      'This almost always means the private key newlines were mangled in transit. ' +
+      'Fix: set FIREBASE_SERVICE_ACCOUNT_B64 instead — ' +
+      'base64 -w0 serviceAccount.json — and paste that single-line value.'
   );
 }
 

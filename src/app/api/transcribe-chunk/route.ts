@@ -12,6 +12,10 @@ export const maxDuration = 60; // one ~8-min audio chunk transcribes well within
 
 const CACHE_COL = 'transcribecachecaptionist';
 const MAX_BYTES = 25 * 1024 * 1024;
+/** Bump whenever the transcription/post-processing pipeline changes, so old
+ *  cached transcripts (produced by the previous filtering rules) are not
+ *  served for a re-uploaded file. v4 = relaxed segment filtering + gap fill. */
+const TRANSCRIBE_VERSION = 'v4';
 
 /**
  * Transcribes ONE audio chunk (uploaded to Storage by the client) and returns
@@ -47,7 +51,7 @@ export async function POST(req: NextRequest) {
     }
 
     const lang = language === 'auto' ? undefined : language;
-    const hash = crypto.createHash('sha256').update(buffer).update(`|${lang || 'auto'}|v3`).digest('hex');
+    const hash = crypto.createHash('sha256').update(buffer).update(`|${lang || 'auto'}|${TRANSCRIBE_VERSION}`).digest('hex');
     const cacheRef = adminDb.collection(CACHE_COL).doc(hash);
     const cached = await cacheRef.get();
 

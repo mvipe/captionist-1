@@ -2,13 +2,19 @@
   {
     "origin": [
       "http://localhost:3000",
+      "http://localhost:3001",
       "https://captionist-beta.vercel.app",
-      "https://*.vercel.app",
-      "https://yeseditor.com",
-      "https://www.yeseditor.com"
+      "https://*.vercel.app"
     ],
     "method": ["GET", "HEAD"],
-    "responseHeader": ["Content-Type", "Content-Range", "Accept-Ranges", "Range", "Access-Control-Allow-Origin"],
+    "responseHeader": [
+      "Content-Type",
+      "Content-Length",
+      "Content-Range",
+      "Accept-Ranges",
+      "Range",
+      "ETag"
+    ],
     "maxAgeSeconds": 3600
   }
 ]

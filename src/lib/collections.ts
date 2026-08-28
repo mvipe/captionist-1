@@ -15,6 +15,7 @@ export const COLLECTIONS = {
   creators: 'creatorscaptionist',
   templates: 'templatescaptionist',
   transitions: 'transitionscaptionist',
+  userAnimations: 'useranimationscaptionist',
   landingVideos: 'landingvideoscaptionist',
   siteContent: 'sitecontentcaptionist',
   otp: 'otpcaptionist',

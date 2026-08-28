@@ -125,12 +125,14 @@ export async function transcribeBuffer(
     words?: Array<{ word: string; start: number; end: number }>;
   };
 
-  const cleaned = cleanSegments(r.segments || []);
+  const { kept, hard } = cleanSegments(r.segments || []);
   const words = (r.words || [])
     .map((w) => ({ text: (w.word || '').trim(), start: w.start, end: w.end }))
     .filter((w) => w.text);
   // Prefer REAL per-word timestamps (exact sync); fall back to char-splitting.
-  const split = words.length ? groupWords(words, cleaned, 3) : splitSegments(cleaned, 20);
+  const grouped = words.length ? groupWords(words, hard, 3) : splitSegments(kept, 20);
+  // Anything Whisper heard but the word pass missed still gets a caption.
+  const split = fillGaps(grouped, kept, 3);
 
   return {
     language: r.language || language || 'unknown',
@@ -143,16 +145,44 @@ export async function transcribeBuffer(
 /* ── Accuracy post-processing ─────────────────────────────────────────────
  * Whisper "hallucinates" text over silence (especially at the very start) and
  * sometimes repeats. verbose_json gives per-segment confidence we can filter on.
+ *
+ * IMPORTANT: filtering here used to be far too aggressive — a single low
+ * avg_logprob (very common for Hindi/Urdu/Tamil and for quiet or accented
+ * speech) threw away a whole segment, and every word inside it disappeared
+ * from the caption track. That is what produced stretches of video with voice
+ * but no captions. We now split rejections into two classes:
+ *   - HARD  : provably not speech (boilerplate, looping garbage, silence).
+ *             Words inside these spans are dropped.
+ *   - SOFT  : merely low-confidence. The segment text is not trusted for the
+ *             plain-text transcript, but its WORDS are still captioned, so
+ *             audible speech always gets a caption.
  */
 const HALLUCINATION_PATTERNS = [
   /thanks? for watching/i, /please subscribe/i, /subtitles? by/i,
   /amara\.org/i, /transcription by/i, /^\s*[♪♫\[\](){}]+\s*$/, /www\./i,
 ];
 
+export interface SegSpan { start: number; end: number; text: string }
+
+function isLoopingGarbage(text: string): boolean {
+  const words = text.split(/\s+/).filter(Boolean);
+  if (words.length > 6) {
+    const uniq = new Set(words.map((w) => w.toLowerCase()));
+    if (uniq.size <= 2) return true;
+  }
+  return false;
+}
+
+/**
+ * Returns the segments we trust (`kept`) plus the spans we are confident hold
+ * no speech at all (`hard`), which is the only thing allowed to delete words.
+ */
 function cleanSegments(
   segs: Array<{ start: number; end: number; text: string; no_speech_prob?: number; avg_logprob?: number; compression_ratio?: number }>
-): Array<{ start: number; end: number; text: string }> {
-  const out: Array<{ start: number; end: number; text: string }> = [];
+): { kept: SegSpan[]; hard: SegSpan[] } {
+  const kept: SegSpan[] = [];
+  const hard: SegSpan[] = [];
+
   for (const s of segs) {
     const text = (s.text || '').trim();
     if (!text) continue;
@@ -161,35 +191,43 @@ function cleanSegments(
     const logprob = s.avg_logprob ?? 0;
     const compression = s.compression_ratio ?? 1;
 
-    // Non-speech: Whisper is confident this span is silence/noise.
-    if (noSpeech > 0.6 && logprob < -0.4) continue;
-    // Very low confidence overall → likely garbage over quiet audio.
-    if (logprob < -1.0) continue;
-    // Repetition hallucination ("the the the…", looped phrases).
-    if (compression > 2.4) continue;
-    // Known boilerplate Whisper injects on silence.
-    if (HALLUCINATION_PATTERNS.some((re) => re.test(text))) continue;
-    // Degenerate single-token repeats.
-    const words = text.split(/\s+/);
-    if (words.length > 4 && new Set(words.map((w) => w.toLowerCase())).size <= 2) continue;
+    // ── HARD rejects: this really is not speech ──────────────────────────
+    // Known boilerplate Whisper injects over silence.
+    if (HALLUCINATION_PATTERNS.some((re) => re.test(text))) { hard.push({ ...s, text }); continue; }
+    // Runaway repetition ("the the the…") — compression_ratio is the classic tell.
+    if (compression > 2.8) { hard.push({ ...s, text }); continue; }
+    if (isLoopingGarbage(text)) { hard.push({ ...s, text }); continue; }
+    // Whisper is *very* sure this span is silence AND the text is nonsense.
+    if (noSpeech > 0.85 && logprob < -0.8) { hard.push({ ...s, text }); continue; }
 
-    out.push({ start: s.start, end: s.end, text });
+    // ── Everything else is kept ──────────────────────────────────────────
+    // Low avg_logprob alone is NOT a reason to drop speech: Indic languages,
+    // background music, whispering and fast speech all sit well below -1.0.
+    kept.push({ start: s.start, end: s.end, text });
   }
-  return out;
+
+  // Safety net: if the filters somehow removed everything, trust the raw
+  // segments rather than returning an empty transcript.
+  if (kept.length === 0 && segs.length) {
+    return {
+      kept: segs.filter((s) => (s.text || '').trim()).map((s) => ({ start: s.start, end: s.end, text: s.text.trim() })),
+      hard: [],
+    };
+  }
+  return { kept, hard };
 }
 
-/* Break long segments into short, single-line captions (~in sync, like Kalakar).
- * Timing is distributed across the split lines proportionally to character count. */
 /* Kalakar-style captions: group REAL word timestamps into 1-3 word chunks,
- * breaking at punctuation and natural speech pauses. Words falling inside
- * segments that were filtered out as silence/hallucination are dropped too. */
+   breaking at punctuation and natural speech pauses. Only words that fall
+   inside a HARD-rejected (proven non-speech) span are discarded — everything
+   the model heard otherwise gets a caption. */
 function groupWords(
   words: Array<{ text: string; start: number; end: number }>,
-  kept: Array<{ start: number; end: number; text: string }>,
+  hard: SegSpan[],
   maxWords = 3
 ): Array<{ start: number; end: number; text: string }> {
-  const inKept = (t: number) => kept.some((s) => t >= s.start - 0.15 && t <= s.end + 0.15);
-  const ws = words.filter((w) => inKept((w.start + w.end) / 2));
+  const inHard = (t: number) => hard.some((s) => t >= s.start - 0.05 && t <= s.end + 0.05);
+  const ws = hard.length ? words.filter((w) => !inHard((w.start + w.end) / 2)) : words;
   const out: Array<{ start: number; end: number; text: string }> = [];
   let cur: typeof ws = [];
   const flush = () => {
@@ -205,6 +243,42 @@ function groupWords(
     if (cur.length >= maxWords || punct || gap > 0.6 || !next) flush();
   }
   return out;
+}
+
+/**
+ * Fill silent-looking holes: if the trusted segment list covers speech that the
+ * word-level pass dropped (or vice-versa), make sure nothing audible is left
+ * without a caption. Any kept segment with no caption overlapping it at all is
+ * re-added, split into short chunks.
+ */
+function fillGaps(
+  captions: Array<{ start: number; end: number; text: string }>,
+  kept: SegSpan[],
+  maxWords = 3
+): Array<{ start: number; end: number; text: string }> {
+  if (!kept.length) return captions;
+  const covered = (a: number, b: number) =>
+    captions.some((c) => Math.min(c.end, b) - Math.max(c.start, a) > Math.min(0.25, (b - a) * 0.5));
+  const extra: Array<{ start: number; end: number; text: string }> = [];
+  for (const s of kept) {
+    if (s.end - s.start < 0.12) continue;
+    if (covered(s.start, s.end)) continue;
+    // Not captioned anywhere — split this segment's text across its duration.
+    const words = s.text.split(/\s+/).filter(Boolean);
+    if (!words.length) continue;
+    const dur = s.end - s.start;
+    const totalChars = words.reduce((a, w) => a + w.length, 0) || 1;
+    let t = s.start;
+    for (let i = 0; i < words.length; i += maxWords) {
+      const chunk = words.slice(i, i + maxWords);
+      const chars = chunk.reduce((a, w) => a + w.length, 0);
+      const sl = (chars / totalChars) * dur;
+      extra.push({ start: t, end: Math.min(s.end, t + sl), text: chunk.join(' ') });
+      t += sl;
+    }
+  }
+  if (!extra.length) return captions;
+  return [...captions, ...extra].sort((a, b) => a.start - b.start);
 }
 
 function splitSegments(

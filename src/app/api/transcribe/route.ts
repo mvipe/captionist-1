@@ -12,6 +12,10 @@ export const maxDuration = 300; // seconds. Hobby clamps to its plan cap; Pro ho
 
 const CACHE_COL = 'transcribecachecaptionist';
 const MAX_BYTES = 25 * 1024 * 1024;
+/** Bump whenever the transcription/post-processing pipeline changes, so old
+ *  cached transcripts (produced by the previous filtering rules) are not
+ *  served for a re-uploaded file. v4 = relaxed segment filtering + gap fill. */
+const TRANSCRIBE_VERSION = 'v4';
 
 export async function POST(req: NextRequest) {
   const user = await getSessionUser(req);
@@ -62,8 +66,7 @@ export async function POST(req: NextRequest) {
     const lang = language === 'auto' ? undefined : language;
 
     // Cache: transcribing the same audio again (retries, re-uploads) is free.
-    // v2: bumped after adding silence/hallucination filtering — invalidates old cached transcripts
-    const hash = crypto.createHash('sha256').update(buffer).update(`|${lang || 'auto'}|v3`).digest('hex');
+    const hash = crypto.createHash('sha256').update(buffer).update(`|${lang || 'auto'}|${TRANSCRIBE_VERSION}`).digest('hex');
     const cacheRef = adminDb.collection(CACHE_COL).doc(hash);
     const cached = await cacheRef.get();
 

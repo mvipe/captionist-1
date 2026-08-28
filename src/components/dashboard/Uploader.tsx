@@ -112,11 +112,44 @@ export default function Uploader({ onDone }: { onDone?: () => void }) {
         if (!res.ok) throw new Error(data.error || `Chunk ${i + 1} failed (${res.status})`);
 
         if (data.language && detectedLang === 'auto') detectedLang = data.language;
-        totalAudioDur += c.durationSec;
-        for (const s of data.segments || []) {
-          allSegments.push({ start: s.start + c.offsetSec, end: s.end + c.offsetSec, text: s.text });
+        totalAudioDur = Math.max(totalAudioDur, c.windowEndSec);
+
+        /* Chunks overlap by a few seconds so a word spoken across a cut is
+           captured whole by at least one of them. The only thing we drop here
+           is this chunk's truncated tail — a word Whisper had to cut off at the
+           end of the audio it was given. Everything else is kept and the
+           duplicates from the overlap are removed in the merge pass below,
+           which compares how much two captions actually overlap in time rather
+           than trusting a fixed boundary (a fixed boundary dropped BOTH copies
+           of a word that ended right on the seam). */
+        const offset = c.offsetSec;
+        for (const seg of (data.segments || []) as { start: number; end: number; text: string }[]) {
+          if (!seg.text || !seg.text.trim()) continue;
+          const start = seg.start + offset;
+          const end = seg.end + offset;
+          if (!c.isLast && end >= c.audioEndSec - 0.05) continue; // truncated tail
+          allSegments.push({ start, end, text: seg.text });
         }
       }
+
+      /* Merge pass: drop a caption only when an already-accepted caption covers
+         more than half of it. That removes the duplicated overlap region while
+         keeping a word that merely straddles the seam. */
+      allSegments.sort((a, b) => a.start - b.start);
+      const merged: typeof allSegments = [];
+      for (const seg of allSegments) {
+        const dur = Math.max(0.01, seg.end - seg.start);
+        let covered = false;
+        for (let k = merged.length - 1; k >= 0 && k > merged.length - 12; k--) {
+          const m = merged[k];
+          if (m.end <= seg.start) break;                       // sorted: no more overlap possible
+          const ov = Math.min(m.end, seg.end) - Math.max(m.start, seg.start);
+          if (ov / dur > 0.5) { covered = true; break; }
+        }
+        if (!covered) merged.push(seg);
+      }
+      allSegments.length = 0;
+      allSegments.push(...merged);
 
       /* 4) Wait for the video upload to complete, then create the project */
       setPhase('Finishing upload…');

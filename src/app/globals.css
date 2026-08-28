@@ -134,6 +134,34 @@ body {
 .cap-slide { animation: capSlideX .4s ease both }
 .cap-slideup { animation: capSlideY .4s ease both }
 
+/* ── Timeline / caption-rail highlights ─────────────────────────────
+   These are toggled with data-attributes by the playback loop instead of
+   React state, so the current caption can update at 60fps without
+   re-rendering the editor (which is what made the video stutter). */
+.tl-seg {
+  background: linear-gradient(180deg, rgba(79, 140, 255, 0.3), rgba(79, 140, 255, 0.14));
+  border: 1px solid rgba(79, 140, 255, 0.35);
+  color: var(--text);
+}
+.tl-seg[data-on] {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.tl-word[data-live] {
+  outline: 1px solid var(--accent);
+}
+.cap-row-badge {
+  color: var(--text-muted);
+  border: 1px solid var(--editor-border);
+  background: transparent;
+}
+.cap-row[data-on] .cap-row-badge {
+  background: var(--accent);
+  color: #fff;
+  border-color: transparent;
+}
+
 /* thin scrollbars inside the editor */
 .editor-scroll::-webkit-scrollbar { width: 8px; height: 8px }
 .editor-scroll::-webkit-scrollbar-thumb { background: var(--editor-border); border-radius: 8px }

@@ -10,14 +10,28 @@
 import { Mp3Encoder } from '@breezystack/lamejs';
 
 export interface AudioChunk {
-  blob: Blob;        // MP3 data
-  offsetSec: number; // where this chunk starts in the original video
-  durationSec: number;
+  blob: Blob;         // MP3 data
+  offsetSec: number;  // where this chunk's AUDIO starts in the original video
+  durationSec: number;// length of this chunk's audio (includes the overlap)
+  /** Nominal (non-overlapping) window this chunk owns, in original-video time.
+   *  Chunks overlap by OVERLAP_SECONDS so a word spoken across a cut is never
+   *  lost; the merge step uses these bounds to de-duplicate the seam. */
+  windowStartSec: number;
+  windowEndSec: number;
+  /** Absolute time where this chunk's audio ends (windowEndSec, or the end of
+   *  the media for the last chunk). Segments touching it are truncated words. */
+  audioEndSec: number;
+  isLast: boolean;
 }
 
 const TARGET_RATE = 16000;
 const BITRATE_KBPS = 32;
 const CHUNK_SECONDS = 8 * 60; // 8 min ≈ 1.9 MB per chunk, ~30-45s Whisper time
+/** Each chunk after the first also re-reads the previous 3 s of audio. Without
+ *  this, a word spoken across a chunk boundary is cut in half and Whisper drops
+ *  it from BOTH chunks — which left several seconds of speech with no caption
+ *  every 8 minutes. */
+const OVERLAP_SECONDS = 3;
 
 export async function extractAudioChunks(
   file: File,
@@ -69,12 +83,16 @@ export async function extractAudioChunks(
   }
 
   const chunkFrames = CHUNK_SECONDS * TARGET_RATE;
+  const overlapFrames = OVERLAP_SECONDS * TARGET_RATE;
   const chunks: AudioChunk[] = [];
   const total = Math.ceil(pcm.length / chunkFrames);
+  const totalSec = pcm.length / TARGET_RATE;
 
   for (let c = 0; c < total; c++) {
     onProgress?.(total > 1 ? `Encoding audio ${c + 1}/${total}…` : 'Encoding audio…');
-    const slice = pcm.subarray(c * chunkFrames, Math.min((c + 1) * chunkFrames, pcm.length));
+    const from = Math.max(0, c * chunkFrames - (c > 0 ? overlapFrames : 0));
+    const to = Math.min((c + 1) * chunkFrames, pcm.length);
+    const slice = pcm.subarray(from, to);
     const enc = new Mp3Encoder(1, TARGET_RATE, BITRATE_KBPS);
     const parts: Uint8Array[] = [];
     const BLOCK = 1152 * 20;
@@ -85,10 +103,15 @@ export async function extractAudioChunks(
     }
     const end = enc.flush();
     if (end.length) parts.push(new Uint8Array(end));
+    const isLast = c === total - 1;
     chunks.push({
       blob: new Blob(parts as BlobPart[], { type: 'audio/mpeg' }),
-      offsetSec: c * CHUNK_SECONDS,
+      offsetSec: from / TARGET_RATE,
       durationSec: slice.length / TARGET_RATE,
+      windowStartSec: c * CHUNK_SECONDS,
+      windowEndSec: Math.min((c + 1) * CHUNK_SECONDS, totalSec),
+      audioEndSec: to / TARGET_RATE,
+      isLast,
     });
   }
   return chunks;

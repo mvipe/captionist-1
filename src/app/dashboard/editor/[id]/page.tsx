@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { authFetch } from '@/lib/authFetch';
 import { storage, auth as fbAuth } from '@/lib/firebaseClient';
@@ -9,12 +9,17 @@ import { useAuth } from '@/context/AuthContext';
 import toast from 'react-hot-toast';
 import type { Project } from '@/types';
 import {
+  sanitizeAnimationCss, namespaceAnimationCss, trackFor, sampleTrack, NEUTRAL,
+  isCustomAnim, customAnimId, customAnimDocId, type CustomAnimation, type AnimSample,
+} from '@/lib/capAnim';
+import {
   ArrowLeft, Download, FileText, Loader2, Save, Trash2, Search, Settings2,
   Play, Pause, Volume2, VolumeX, Maximize2, ZoomIn, ZoomOut, RotateCcw,
   Sparkles, Plus, ChevronLeft, ChevronRight, X, ChevronDown, ChevronUp,
   Eraser, Clock, LayoutGrid, Palette, Check, Ban, Circle, Search as SearchIcon,
   ChevronsLeft, ChevronsUp, MoveHorizontal, ZoomIn as ZoomIcon, Type as TypeIcon,
   Volume2 as SpeakerIcon, Zap, Languages, Bookmark, AlignLeft, AlignCenter, AlignRight,
+  Upload, Film,
 } from 'lucide-react';
 
 /* ══════════════════════ types ══════════════════════ */
@@ -110,6 +115,12 @@ const TRANSITIONS = [
 const ANIM: Record<string, string> = {
   none: '', fade: 'cap-fade', pop: 'cap-pop', zoom: 'cap-zoom',
   scale: 'cap-scale', slide: 'cap-slide', slideup: 'cap-slideup',
+};
+/** Built-in transition ids map to a .cap-* class; uploaded ones to .cap-ca_<id>. */
+const animClass = (id?: string) => {
+  if (!id || id === 'none') return '';
+  if (isCustomAnim(id)) return `cap-ca_${customAnimDocId(id).replace(/[^\w]/g, '')}`;
+  return ANIM[id] || '';
 };
 
 /* ══════════════════════ helpers ══════════════════════ */
@@ -214,7 +225,6 @@ export default function EditorPage() {
 
   const [playing, setPlaying] = useState(false);
   const [muted, setMuted] = useState(false);
-  const [current, setCurrent] = useState(0);
   const [duration, setDuration] = useState(0);
   const [activeIdx, setActiveIdx] = useState(-1);
 
@@ -277,11 +287,12 @@ export default function EditorPage() {
     document.head.appendChild(l);
   }, []);
 
-  /* presets + custom fonts are stored per-user in Firestore */
+  /* presets + custom fonts + custom animations are stored per-user in Firestore */
   useEffect(() => {
     (async () => {
       try { const r = await authFetch('/api/presets'); if (r.ok) setPresets((await r.json()).presets || []); } catch {}
       try { const r = await authFetch('/api/fonts'); if (r.ok) setCustomFonts((await r.json()).fonts || []); } catch {}
+      try { const r = await authFetch('/api/animations'); if (r.ok) setCustomAnims((await r.json()).animations || []); } catch {}
     })();
   }, []);
   const savePreset = async () => {
@@ -292,6 +303,74 @@ export default function EditorPage() {
       setPresets((p) => [d.preset, ...p]);
       toast.success('Preset saved to your account');
     } catch (e: any) { toast.error(e?.message || 'Save failed'); }
+  };
+
+  /* ── My Animations: user-uploaded CSS @keyframes ────────────────────────
+     A creator exports/writes an animation as a .css file (After Effects users
+     typically hand-write the equivalent @keyframes, or export from a
+     CSS-animation tool) and can then apply it to lines or individual words
+     exactly like a built-in transition. The CSS is sanitised on both ends and
+     the keyframe names are namespaced per animation so two uploads can never
+     collide. */
+  const [customAnims, setCustomAnims] = useState<CustomAnimation[]>([]);
+  const animInputRef = useRef<HTMLInputElement>(null);
+  const [animBusy, setAnimBusy] = useState(false);
+  const customAnimsRef = useRef<CustomAnimation[]>([]);
+  useEffect(() => { customAnimsRef.current = customAnims; }, [customAnims]);
+
+  useEffect(() => {
+    customAnims.forEach((a) => {
+      if (document.querySelector(`style[data-anim="${a.id}"]`)) return;
+      try {
+        const { css } = namespaceAnimationCss(a);
+        const st = document.createElement('style');
+        st.dataset.anim = a.id;
+        st.textContent = css;
+        document.head.appendChild(st);
+      } catch (e) { console.warn('[anim] could not inject', a.name, e); }
+    });
+  }, [customAnims]);
+
+  const addAnimation = async (f: File | null) => {
+    if (!f) return;
+    if (!/\.css$/i.test(f.name)) return toast.error('Upload a .css file containing your @keyframes');
+    if (f.size > 200 * 1024) return toast.error('Animation file must be under 200 KB');
+    setAnimBusy(true);
+    try {
+      const raw = await f.text();
+      // Validate + show the user which keyframes we found before saving.
+      const clean = sanitizeAnimationCss(raw);
+      const suggested = f.name.replace(/\.css$/i, '').replace(/[-_]+/g, ' ').slice(0, 40);
+      const name = (typeof window !== 'undefined' ? window.prompt('Name this animation', suggested) : suggested) || suggested;
+      let keyframe = clean.names[0];
+      if (clean.names.length > 1 && typeof window !== 'undefined') {
+        const pickName = window.prompt(`Which @keyframes should play?\n\n${clean.names.join('\n')}`, clean.names[0]);
+        if (pickName && clean.names.includes(pickName.trim())) keyframe = pickName.trim();
+      }
+      const res = await authFetch('/api/animations', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, css: raw, keyframe }),
+      });
+      const d = await res.json();
+      if (!res.ok) throw new Error(d.error || 'Failed');
+      setCustomAnims((p) => [d.animation, ...p]);
+      toast.success(`Animation "${d.animation.name}" added`);
+    } catch (e: any) { toast.error(e?.message || 'Animation upload failed'); }
+    finally { setAnimBusy(false); if (animInputRef.current) animInputRef.current.value = ''; }
+  };
+
+  const removeAnimation = async (a: CustomAnimation) => {
+    if (typeof window !== 'undefined' && !window.confirm(`Delete "${a.name}"?`)) return;
+    try {
+      const res = await authFetch(`/api/animations?id=${encodeURIComponent(a.id)}`, { method: 'DELETE' });
+      if (!res.ok) throw new Error((await res.json()).error || 'Failed');
+      document.querySelector(`style[data-anim="${a.id}"]`)?.remove();
+      setCustomAnims((p) => p.filter((x) => x.id !== a.id));
+      const gone = customAnimId(a.id);
+      if (style.transition === gone) patchGlobal({ transition: 'none' });
+      if (style.wordTransition === gone) patchGlobal({ wordTransition: 'none' });
+      toast.success('Animation deleted');
+    } catch (e: any) { toast.error(e?.message || 'Delete failed'); }
   };
 
   /* custom fonts: injected as @font-face, available in every dropdown */
@@ -349,13 +428,13 @@ export default function EditorPage() {
   const allWords = useMemo(() => segments.flatMap((s, i) => segWords(s, i)), [segments]);
 
   /* heavy timeline rows are memoized so drags/typing/timeupdate don't re-render them */
-  const heights = useMemo(() => waveHeights(Math.max(80, Math.floor(totalDur * 4))), [totalDur]);
   const tlWidth = Math.max(totalDur * pxPerSec, 800);
+  /* The waveform used to be one <span> per 250 ms — a 10-minute video meant
+     ~2 400 extra DOM nodes that React had to walk on every single re-render.
+     It is now a single canvas painted once per zoom level. */
   const waveRow = useMemo(() => (
-    <div className="flex h-20 items-center gap-[2px] px-1" style={{ background: 'var(--editor-panel)' }}>
-      {heights.map((h, i) => (<span key={i} className="inline-block rounded-full" style={{ width: Math.max(1.5, tlWidth / heights.length - 2), height: `${h * 100}%`, background: 'linear-gradient(180deg, var(--accent) 0%, rgba(79,140,255,.4) 100%)', opacity: 0.9 }} />))}
-    </div>
-  ), [heights, tlWidth]);
+    <WaveRow width={tlWidth} seconds={totalDur} />
+  ), [tlWidth, totalDur]);
   const rulerRow = useMemo(() => (
     <div className="relative h-7 border-b" style={{ borderColor: 'var(--editor-border)' }}>
       {pxPerSec >= 14 && Array.from({ length: Math.ceil(totalDur) + 1 }).map((_, i) =>
@@ -411,52 +490,169 @@ export default function EditorPage() {
     return () => { el.removeEventListener('wheel', onWheel); el.removeEventListener('touchstart', ts); el.removeEventListener('touchmove', tm); el.removeEventListener('touchend', te); };
   }, [loading, pxPerSec]);
 
-  /* Smooth playback loop: the playhead moves via a ref at 60fps (no React
-     re-render), the active caption switches the instant its word starts, and
-     the clock/seekbar state updates ~10x/s. */
+  /* ── Smooth playback loop ──────────────────────────────────────────────
+     Nothing in here touches React state except the active-caption index.
+     The playhead, the clock, the seek bar, the timeline scroll position and
+     the "live" highlights are all written straight to the DOM.
+
+     Re-rendering this component ten times a second (the old `setCurrent(t)`)
+     forced React to reconcile the caption rail, the inspector AND every block
+     in the timeline on every tick. On anything longer than a minute or two
+     that starved the main thread, and the <video> visibly froze mid-playback
+     even once it was fully buffered. */
   const playheadRef = useRef<HTMLDivElement>(null);
+  const clockRef = useRef<HTMLSpanElement>(null);
+  const seekRef = useRef<HTMLInputElement>(null);
+  const currentRef = useRef(0);
   const pxRef = useRef(pxPerSec); useEffect(() => { pxRef.current = pxPerSec; }, [pxPerSec]);
   const segsRef = useRef(segments); useEffect(() => { segsRef.current = segments; }, [segments]);
+  const allWordsRef = useRef<WordTok[]>([]); useEffect(() => { allWordsRef.current = allWords; }, [allWords]);
+  const totalDurRef = useRef(1); useEffect(() => { totalDurRef.current = totalDur; }, [totalDur]);
   const activeRef = useRef(-1);
+  const liveElRef = useRef<HTMLElement | null>(null);
+
+  /* Only the slice of the timeline that is on screen is mounted. A 10-minute
+     video is ~2 000 word blocks; mounting them all cost tens of milliseconds
+     per render. */
+  const [tlWindow, setTlWindow] = useState({ from: 0, to: 240 });
+  const tlWindowRef = useRef(tlWindow);
+  useEffect(() => { tlWindowRef.current = tlWindow; }, [tlWindow]);
+  const syncTlWindow = useCallback(() => {
+    const el = tlRef.current; if (!el) return;
+    const px = pxRef.current || 1;
+    const from = el.scrollLeft / px;
+    const to = (el.scrollLeft + el.clientWidth) / px;
+    const w = tlWindowRef.current;
+    if (from >= w.from + 0.5 && to <= w.to - 0.5) return;   // still inside the padded window
+    const pad = Math.max(4, to - from);
+    const next = { from: Math.max(0, from - pad), to: to + pad };
+    tlWindowRef.current = next;
+    setTlWindow(next);
+  }, []);
+
+  /** Push the current time into the DOM without re-rendering React. */
+  const setTimeUI = useCallback((t: number) => {
+    currentRef.current = t;
+    if (playheadRef.current) playheadRef.current.style.transform = `translateX(${t * pxRef.current}px)`;
+    if (clockRef.current) clockRef.current.textContent = tc(t);
+    const total = totalDurRef.current || 1;
+    const sb = seekRef.current;
+    if (sb && document.activeElement !== sb) {
+      const v = Math.min(t, total);
+      sb.value = String(v);
+      sb.style.background = `linear-gradient(to right, var(--text) ${(v / total) * 100}%, var(--editor-border) 0%)`;
+    }
+  }, []);
+
   useEffect(() => {
-    let raf = 0; let lastState = 0;
+    let raf = 0; let lastHousekeeping = 0;
     const loop = () => {
       const v = videoRef.current;
       if (v) {
         const t = v.currentTime;
-        if (playheadRef.current) playheadRef.current.style.transform = `translateX(${t * pxRef.current}px)`;
+        if (t !== currentRef.current) setTimeUI(t);
+
+        /* Active caption lookup. Captions are sorted, so walk from where we
+           were instead of re-scanning the whole array 60 times a second — a
+           10-minute video is ~2 000 captions and findIndex() was doing up to
+           120 000 comparisons per second. */
         const segs = segsRef.current;
         const cur = segs[activeRef.current];
         if (!(cur && t >= cur.start && t <= cur.end)) {
-          const idx = segs.findIndex((sg) => t >= sg.start && t <= sg.end);
+          let idx = -1;
+          const from = activeRef.current;
+          if (from >= 0 && from < segs.length && t >= segs[from].start) {
+            for (let i = from; i < segs.length && segs[i].start <= t; i++) {
+              if (t >= segs[i].start && t <= segs[i].end) { idx = i; break; }
+            }
+          } else {
+            let lo = 0, hi = segs.length - 1;   // seeked backwards / first run
+            while (lo <= hi) {
+              const mid = (lo + hi) >> 1;
+              if (t < segs[mid].start) hi = mid - 1;
+              else if (t > segs[mid].end) lo = mid + 1;
+              else { idx = mid; break; }
+            }
+          }
           if (idx !== activeRef.current) { activeRef.current = idx; setActiveIdx(idx); }
         }
+
         const now = performance.now();
-        if (now - lastState > 100) { lastState = now; setCurrent(t); }
+        if (now - lastHousekeeping > 220) {
+          lastHousekeeping = now;
+          const el = tlRef.current;
+          if (el && !v.paused) {
+            const x = t * pxRef.current;
+            if (x < el.scrollLeft + 60 || x > el.scrollLeft + el.clientWidth - 120) {
+              el.scrollLeft = Math.max(0, x - el.clientWidth / 2);
+            }
+          }
+          syncTlWindow();
+          /* "live" outlines (the current word block in the timeline and the
+             current row in the caption rail) are toggled imperatively so they
+             cost nothing in React. */
+          const key = allWordsRef.current.find((w) => t >= w.start && t <= w.end)?.key;
+          const target = key ? (document.querySelector(`[data-wk="${CSS.escape(key)}"]`) as HTMLElement | null) : null;
+          if (liveElRef.current !== target) {
+            if (liveElRef.current) liveElRef.current.removeAttribute('data-live');
+            if (target) target.setAttribute('data-live', '1');
+            liveElRef.current = target;
+          }
+        }
       }
       raf = requestAnimationFrame(loop);
     };
     raf = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(raf);
-  }, [loading]);
+  }, [loading, syncTlWindow, setTimeUI]);
 
   useEffect(() => {
     const v = videoRef.current; if (!v) return;
     const p = () => setPlaying(true), q = () => setPlaying(false);
     const m = () => { if (v.duration && isFinite(v.duration)) setDuration(v.duration); if (v.videoWidth && v.videoHeight) setVRatio(v.videoWidth / v.videoHeight); };
+    /* Stall recovery. Firebase Storage serves the MP4 over ranged requests; if
+       a range response is slow or the moov atom sits at the end of the file the
+       element can sit in `waiting` forever even though the data is already
+       buffered. Nudging currentTime forces the decoder to pick up again. */
+    let stallTimer: any = null;
+    const clearStall = () => { if (stallTimer) { clearTimeout(stallTimer); stallTimer = null; } };
+    const armStall = () => {
+      clearStall();
+      stallTimer = setTimeout(() => {
+        stallTimer = null;
+        if (v.paused || v.ended) return;
+        const t = v.currentTime;
+        // is the data for "now" actually buffered? then it's a decoder hiccup
+        let buffered = false;
+        for (let i = 0; i < v.buffered.length; i++) {
+          if (t >= v.buffered.start(i) - 0.1 && t < v.buffered.end(i) - 0.05) { buffered = true; break; }
+        }
+        if (buffered) { v.currentTime = Math.min((v.duration || t) - 0.01, t + 0.02); v.play().catch(() => {}); }
+      }, 900);
+    };
+    const onWaiting = () => armStall();
+    const onPlaying = () => clearStall();
+
     v.addEventListener('play', p); v.addEventListener('pause', q); v.addEventListener('loadedmetadata', m);
+    v.addEventListener('waiting', onWaiting); v.addEventListener('stalled', onWaiting);
+    v.addEventListener('playing', onPlaying); v.addEventListener('canplay', onPlaying); v.addEventListener('seeked', onPlaying);
     if (v.readyState >= 1) m(); // metadata may already be loaded (cached video) — honor 9:16 / 4:3 immediately
-    return () => { v.removeEventListener('play', p); v.removeEventListener('pause', q); v.removeEventListener('loadedmetadata', m); };
+    return () => {
+      clearStall();
+      v.removeEventListener('play', p); v.removeEventListener('pause', q); v.removeEventListener('loadedmetadata', m);
+      v.removeEventListener('waiting', onWaiting); v.removeEventListener('stalled', onWaiting);
+      v.removeEventListener('playing', onPlaying); v.removeEventListener('canplay', onPlaying); v.removeEventListener('seeked', onPlaying);
+    };
   }, [project?.videoUrl]);
 
-  useEffect(() => {
-    const el = tlRef.current; if (!el) return;
-    const x = current * pxPerSec;
-    if (x < el.scrollLeft + 60 || x > el.scrollLeft + el.clientWidth - 120) el.scrollLeft = Math.max(0, x - el.clientWidth / 2);
-  }, [current, pxPerSec]);
-
-  const togglePlay = () => { const v = videoRef.current; if (!v) return; ensureAudio(); if (v.paused) v.play().catch(() => {}); else v.pause(); };
-  const seekTo = (t: number) => { const v = videoRef.current; if (!v) return; v.currentTime = t; setCurrent(t); };
+  /* NOTE: ensureAudio() is deliberately NOT called here. Creating a
+     MediaElementAudioSourceNode re-routes the element's audio through the
+     WebAudio graph for the rest of the page's life, which couples audio output
+     to the main thread — when the thread is busy the video visibly hitches.
+     The graph is now built only when it is actually needed: the AI-cleaning
+     A/B toggle, or an export (which needs an audio track to record). */
+  const togglePlay = () => { const v = videoRef.current; if (!v) return; if (v.paused) v.play().catch(() => {}); else v.pause(); };
+  const seekTo = (t: number) => { const v = videoRef.current; if (!v) return; v.currentTime = t; setTimeUI(t); };
   const toggleMute = () => { const v = videoRef.current; if (!v) return; v.muted = !v.muted; setMuted(v.muted); };
   const fs = () => stageRef.current?.requestFullscreen?.().catch(() => {});
 
@@ -496,7 +692,7 @@ export default function EditorPage() {
   /* ── edits ── */
   const updateText = (i: number, text: string) => { setSegments((p) => p.map((s, x) => (x === i ? { ...s, text } : s))); markDirty(); };
   const removeSeg = (i: number) => { setSegments((p) => p.filter((_, x) => x !== i)); markDirty(); };
-  const addLine = () => { const s: Seg = { id: Date.now(), start: current, end: Math.min(totalDur, current + 2), text: 'New caption' }; setSegments((p) => [...p, s].sort((a, b) => a.start - b.start)); markDirty(); };
+  const addLine = () => { const t = currentRef.current; const s: Seg = { id: Date.now(), start: t, end: Math.min(totalDur, t + 2), text: 'New caption' }; setSegments((p) => [...p, s].sort((a, b) => a.start - b.start)); markDirty(); };
 
   const patchGlobal = (p: Partial<CapStyle>) => { setStyle((s) => ({ ...s, ...p })); markDirty(); };
   const patchLine = (i: number, p: Partial<CapStyle>) => { setSegments((prev) => prev.map((s, x) => (x === i ? { ...s, style: { ...(s.style || {}), ...p } } : s))); markDirty(); };
@@ -571,10 +767,21 @@ export default function EditorPage() {
   const dl = (data: string, name: string) => { const u = URL.createObjectURL(new Blob([data], { type: 'text/plain;charset=utf-8' })); const a = document.createElement('a'); a.href = u; a.download = name; a.click(); URL.revokeObjectURL(u); };
   const safeName = (title || 'captions').replace(/[^\w-]+/g, '_');
 
-  const animDur = (st: CapStyle, seg?: Seg) => {
+  const animDur = (st: CapStyle, seg?: Seg, transitionId?: string) => {
+    if (transitionId && isCustomAnim(transitionId)) {
+      const a = customAnimsRef.current.find((x) => x.id === customAnimDocId(transitionId));
+      if (a?.duration) return a.duration;
+    }
     if (st.speedMode === 'manual') return Math.max(0.15, 1.1 - (st.speed / 100) * 0.9);
     const d = seg ? Math.max(0.25, seg.end - seg.start) : 0.8;
     return Math.min(0.8, Math.max(0.32, d * 0.4));
+  };
+
+  /** How far into a word's own entrance animation we are, mirroring the CSS
+      animation-delay used by the live overlay. */
+  const wordDelay = (st: CapStyle, seg: Seg, wordStart: number) => {
+    const k = st.speedMode === 'manual' ? (110 - st.speed) / 50 : 1;
+    return Math.max(0, wordStart - seg.start) * k;
   };
 
   /* ── canvas renderer (burns per-word styles + emphasis) ── */
@@ -588,9 +795,10 @@ export default function EditorPage() {
 
     /* Build per-word tokens with the SAME style resolution as the live overlay:
        base styles apply to all words; emphasis adds color/size/font on top. */
-    interface Tok { text: string; fs: number; font: string; color: string; grad?: [string, string]; underline: boolean; w: number; tw: number; spot?: string; }
+    interface Tok { text: string; fs: number; font: string; color: string; grad?: [string, string]; underline: boolean; w: number; tw: number; spot?: string; anim: AnimSample; }
     const words = segWords({ ...seg, text: shown(seg) }, si);
     if (words.length === 0) return;
+    const customs = customAnimsRef.current;
     const toks: Tok[] = words.map((wd) => {
       const ws: any = wordStyles[wd.key] || {};
       const em = !!ws.emphasized;
@@ -608,7 +816,20 @@ export default function EditorPage() {
       const text = upper ? wd.text.toUpperCase() : wd.text;
       const tw = ctx.measureText(text).width;
       const w = tw + ctx.measureText(' ').width;
-      return { text, fs, font, color: c1, grad: useGrad ? [c1, c2] as [string, string] : undefined, underline, w, tw, spot: em && sw.emphasisMode === 'spotlight' ? c1 : undefined };
+
+      /* Word entrance animation, sampled at exactly the same point in time the
+         browser's CSS animation would be at in the live preview — this is what
+         makes the exported MP4 match what the user saw. */
+      const wtr = (ws.wordTransition as string) || st.wordTransition;
+      const wTrack = trackFor(wtr, customs);
+      let anim = NEUTRAL;
+      if (wTrack) {
+        const dur = animDur(sw, seg, wtr);
+        const p = (t - seg.start - wordDelay(st, seg, wd.start)) / dur;
+        anim = p < 0 ? sampleTrack(wTrack, 0) : sampleTrack(wTrack, p);
+      }
+
+      return { text, fs, font, color: c1, grad: useGrad ? [c1, c2] as [string, string] : undefined, underline, w, tw, spot: em && sw.emphasisMode === 'spotlight' ? c1 : undefined, anim };
     });
 
     /* wrap tokens into rows */
@@ -623,6 +844,21 @@ export default function EditorPage() {
     let cy = H * (st.posY / 100);
     cy = Math.min(H - blockH / 2 - 12 * scale, Math.max(blockH / 2 + 12 * scale, cy));
 
+    /* Line entrance animation: applied to the whole block (background box
+       included) around its own centre, so a "slide up" really slides the box. */
+    const lineTrack = trackFor(st.transition, customs);
+    const lineAnimS: AnimSample = lineTrack
+      ? sampleTrack(lineTrack, (t - seg.start) / animDur(st, seg, st.transition))
+      : NEUTRAL;
+
+    ctx.save();
+    if (lineTrack) {
+      ctx.translate(cx + lineAnimS.tx * scale + lineAnimS.txEm * baseFs, cy + lineAnimS.ty * scale + lineAnimS.tyEm * baseFs);
+      if (lineAnimS.rot) ctx.rotate((lineAnimS.rot * Math.PI) / 180);
+      ctx.scale(lineAnimS.sx, lineAnimS.sy);
+      ctx.translate(-cx, -cy);
+    }
+
     const noShadow = () => { ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0; ctx.shadowOffsetY = 0; };
     const applyShadow = (glowColor: string) => {
       if (st.glow) { ctx.shadowColor = glowColor; ctx.shadowBlur = 26 * scale; ctx.shadowOffsetY = 0; }
@@ -631,6 +867,7 @@ export default function EditorPage() {
     };
 
     if (st.background) {
+      ctx.globalAlpha = lineAnimS.opacity;
       const px = baseFs * 0.4, py = baseFs * 0.3;
       const widest = Math.min(maxW, Math.max(...rows.map((r) => r.reduce((a, x) => a + x.w, 0))));
       const bw = widest + px * 2, bh = blockH + py * 2;
@@ -645,6 +882,17 @@ export default function EditorPage() {
       let x = st.align === 'left' ? cx - maxW / 2 : st.align === 'right' ? cx + maxW / 2 - totalW : cx - totalW / 2;
       const y = cy - blockH / 2 + lh / 2 + ri * lh;
       for (const tok of r) {
+        const a = tok.anim;
+        const animated = a !== NEUTRAL || lineAnimS !== NEUTRAL;
+        ctx.save();
+        ctx.globalAlpha = Math.max(0, Math.min(1, lineAnimS.opacity * a.opacity));
+        if (animated) {
+          const wcx = x + tok.tw / 2, wcy = y;
+          ctx.translate(wcx + a.tx * scale + a.txEm * tok.fs, wcy + a.ty * scale + a.tyEm * tok.fs);
+          if (a.rot) ctx.rotate((a.rot * Math.PI) / 180);
+          if (a.sx !== 1 || a.sy !== 1) ctx.scale(a.sx, a.sy);
+          ctx.translate(-wcx, -wcy);
+        }
         ctx.font = tok.font;
         if (tok.spot) {
           noShadow(); ctx.fillStyle = tok.spot;
@@ -662,10 +910,13 @@ export default function EditorPage() {
           ctx.lineWidth = Math.max(1.5, tok.fs * 0.06);
           ctx.beginPath(); ctx.moveTo(x, y + tok.fs * 0.44); ctx.lineTo(x + tok.tw, y + tok.fs * 0.44); ctx.stroke();
         }
+        ctx.restore();
         x += tok.w;
       }
     });
     noShadow();
+    ctx.globalAlpha = 1;
+    ctx.restore();
   };
 
   const render = async () => {
@@ -715,7 +966,7 @@ export default function EditorPage() {
   /* ── live overlay: per-word styles + emphasis + transitions ── */
   const activeSeg = activeIdx >= 0 ? segments[activeIdx] : null;
   const lineSt = activeIdx >= 0 ? effLine(activeIdx) : style;
-  const lineAnim = ANIM[lineSt.transition] || '';
+  const lineAnim = animClass(lineSt.transition);
 
   /* drag caption box on the video to reposition (updates X/Y %) */
   const dragRef = useRef<{ sx: number; sy: number; px: number; py: number; line: number } | null>(null);
@@ -782,7 +1033,7 @@ export default function EditorPage() {
     if (segments.length === 0) return;
     if (preferLine !== undefined && preferLine >= 0) { seekTo(segments[preferLine].start + 0.02); setBump((n) => n + 1); return; }
     if (activeIdx >= 0) { setBump((n) => n + 1); return; }
-    let idx = segments.findIndex((s) => s.start >= current);
+    let idx = segments.findIndex((s) => s.start >= currentRef.current);
     if (idx < 0) idx = segments.length - 1;
     seekTo(segments[idx].start + 0.02); setBump((n) => n + 1);
   };
@@ -841,9 +1092,226 @@ export default function EditorPage() {
 
   const activeWords = useMemo(() => (activeSeg ? segWords({ ...activeSeg, text: shown(activeSeg) }, activeIdx) : []), [activeSeg, activeIdx, romanOn, romanMap]);
 
-  const filtered = segments.map((s, i) => ({ s, i })).filter(({ s }) => !search || s.text.toLowerCase().includes(search.toLowerCase()));
+  const filtered = useMemo(
+    () => segments.map((s, i) => ({ s, i })).filter(({ s }) => !search || s.text.toLowerCase().includes(search.toLowerCase())),
+    [segments, search]
+  );
+
+  /* The caption list is memoized and its "currently playing" marker is applied
+     with a data-attribute (see the effect near the timeline), so the rail is
+     NOT rebuilt every time the active caption changes during playback. */
+  const capRows = useMemo(() => filtered.map(({ s, i }) => {
+    const sel = i === selLine;
+    return (
+      <div key={s.id} data-cap-row={i} onClick={() => { setSelLine(i); setSelWords(new Set()); seekTo(s.start); }}
+        className="cap-row group flex cursor-pointer items-center gap-3 rounded-2xl border px-3 py-3 transition"
+        style={{ background: sel ? 'rgba(79,140,255,.10)' : 'transparent', borderColor: sel ? 'var(--accent)' : 'transparent' }}>
+        <span className="cap-row-badge grid h-7 w-7 shrink-0 place-items-center rounded-full text-[11px] font-bold">{i + 1}</span>
+        <input value={shown(s)} onChange={(e) => updateText(i, e.target.value)} onFocus={() => { setSelLine(i); setSelWords(new Set()); }}
+          className="flex-1 bg-transparent text-[15px] outline-none" style={{ fontFamily: withScript("'Inter',sans-serif") }} />
+        <button onClick={(e) => { e.stopPropagation(); setLineStylingFor(i); setCollapsed((c) => ({ ...c, typo: true })); }}
+          title="Line styling" className="shrink-0 rounded-md p-1.5 transition" style={{ color: 'var(--text-muted)' }}>
+          <LayoutGrid size={17} />
+        </button>
+        <button onClick={(e) => { e.stopPropagation(); removeSeg(i); }} className="shrink-0 opacity-0 transition group-hover:opacity-100" style={{ color: '#ef4444' }}><Trash2 size={14} /></button>
+      </div>
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }), [filtered, selLine, romanOn, romanMap]);
+
+  /* ── timeline blocks ── */
+  const fitW = wrapBox.w && wrapBox.h ? Math.max(220, Math.min(wrapBox.w, wrapBox.h * vRatio)) : 640;
+  const fitH = fitW / vRatio;
+
+  const toggleWord = (key: string, additive: boolean) => {
+    setSelLine(-1);
+    setSelWords((prev) => {
+      const n = new Set(additive ? prev : []);
+      if (prev.has(key) && additive) n.delete(key); else n.add(key);
+      return n;
+    });
+  };
+
+  /* drag a caption block's edge in the timeline to change its start/end time */
+  const startEdge = (e: React.PointerEvent, i: number, side: 'start' | 'end') => {
+    e.stopPropagation(); e.preventDefault();
+    const s0 = segments[i]; if (!s0) return;
+    const sx = e.clientX; const st0 = s0.start, en0 = s0.end;
+    const apply = (ev: PointerEvent) => {
+      const dt = (ev.clientX - sx) / pxPerSec;
+      setSegments((prev) => prev.map((s, x) => {
+        if (x !== i) return s;
+        if (side === 'start') return { ...s, start: Math.max(0, Math.min(en0 - 0.15, st0 + dt)) };
+        return { ...s, end: Math.min(totalDur, Math.max(st0 + 0.15, en0 + dt)) };
+      }));
+    };
+    let raf = 0; let last: PointerEvent | null = null;
+    const move = (ev: PointerEvent) => { last = ev; if (!raf) raf = requestAnimationFrame(() => { raf = 0; if (last) apply(last); }); };
+    const up = () => { if (raf) cancelAnimationFrame(raf); window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); markDirty(); };
+    window.addEventListener('pointermove', move); window.addEventListener('pointerup', up);
+  };
+
+  /* drag the middle of a caption block to SHIFT it in time (snaps to neighbours).
+     A click without movement selects + seeks instead. */
+  const startMove = (e: React.PointerEvent, i: number) => {
+    e.stopPropagation();
+    const s0 = segments[i]; if (!s0) return;
+    const sx = e.clientX; const st0 = s0.start; const dur = s0.end - s0.start;
+    let moved = false;
+    const apply = (ev: PointerEvent) => {
+      const dx = ev.clientX - sx;
+      if (Math.abs(dx) > 3) moved = true;
+      if (!moved) return;
+      let ns = st0 + dx / pxPerSec;
+      const prevEnd = segments[i - 1]?.end ?? 0;
+      const nextStart = segments[i + 1]?.start ?? totalDur;
+      if (Math.abs(ns - prevEnd) < 0.12) ns = prevEnd;                    // snap to previous block
+      if (Math.abs(ns + dur - nextStart) < 0.12) ns = nextStart - dur;    // snap to next block
+      ns = Math.max(0, Math.min(totalDur - dur, ns));
+      setSegments((prev) => prev.map((s, x) => (x === i ? { ...s, start: ns, end: ns + dur } : s)));
+    };
+    let raf = 0; let last: PointerEvent | null = null;
+    const move = (ev: PointerEvent) => { last = ev; if (!raf) raf = requestAnimationFrame(() => { raf = 0; if (last) apply(last); }); };
+    const up = () => {
+      if (raf) cancelAnimationFrame(raf);
+      window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up);
+      if (moved) markDirty();
+      else { setSelLine(i); setSelWords(new Set()); seekTo(segments[i].start); }
+    };
+    window.addEventListener('pointermove', move); window.addEventListener('pointerup', up);
+  };
+
+  /* ── timeline blocks: memoized AND windowed ────────────────────────────
+     Only what is scrolled into view is mounted, and the "active"/"live"
+     highlight is applied through data-attributes by the playback loop, so a
+     caption change does not force this list to re-render. */
+  const tlBlocks = useMemo(() => {
+    const { from, to } = tlWindow;
+    if (tlMode === 'word') {
+      return allWords
+        .filter((w) => w.end >= from && w.start <= to)
+        .map((w) => {
+          const sel = selWords.has(w.key);
+          const em = !!(wordStyles[w.key] as any)?.emphasized;
+          return (
+            <button key={w.key} data-wk={w.key}
+              onClick={(e) => { e.stopPropagation(); toggleWord(w.key, e.metaKey || e.ctrlKey || e.shiftKey); seekTo(w.start); }}
+              className="tl-word absolute top-4 flex items-center justify-center overflow-hidden rounded-md px-1 text-[10px] font-semibold"
+              title={w.text}
+              style={{ left: w.start * pxPerSec, width: Math.max(7, (w.end - w.start) * pxPerSec - 2), height: 40,
+                background: em ? '#C8FF00' : 'var(--editor-block)', color: em ? '#000' : 'var(--text)',
+                outline: sel ? '2px solid var(--accent)' : 'none',
+                fontFamily: withScript("'Inter',sans-serif") }}>
+              <span className="truncate">{w.text}</span>
+            </button>
+          );
+        });
+    }
+    return segments
+      .map((s, i) => ({ s, i }))
+      .filter(({ s }) => s.end >= from && s.start <= to)
+      .map(({ s, i }) => {
+        const sel = i === selLine;
+        return (
+          <div key={s.id} data-tl-seg={i} onClick={(e) => e.stopPropagation()}
+            className="tl-seg absolute top-3 flex items-stretch rounded-lg text-[10px] font-semibold" title={s.text}
+            style={{ left: s.start * pxPerSec, width: Math.max(14, (s.end - s.start) * pxPerSec - 2), height: 44,
+              boxShadow: sel ? '0 0 0 2px var(--accent), 0 4px 14px rgba(0,0,0,.35)' : '0 2px 8px rgba(0,0,0,.2)',
+              fontFamily: withScript("'Inter',sans-serif") }}>
+            <span onPointerDown={(e) => startEdge(e, i, 'start')} className="w-2 shrink-0 cursor-ew-resize rounded-l-lg" style={{ background: 'rgba(255,255,255,.22)' }} />
+            <span onPointerDown={(e) => startMove(e, i)} className="flex min-w-0 flex-1 cursor-grab items-center px-1.5 active:cursor-grabbing"><span className="truncate">{shown(s)}</span></span>
+            <span onPointerDown={(e) => startEdge(e, i, 'end')} className="w-2 shrink-0 cursor-ew-resize rounded-r-lg" style={{ background: 'rgba(255,255,255,.22)' }} />
+          </div>
+        );
+      });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tlMode, tlWindow, allWords, segments, pxPerSec, selWords, selLine, wordStyles, romanOn, romanMap, totalDur]);
+
+  /* keep the imperative "active caption" highlight in sync with activeIdx */
+  useEffect(() => {
+    const el = tlRef.current; if (!el) return;
+    const prev = el.querySelector('[data-tl-seg][data-on]');
+    if (prev) prev.removeAttribute('data-on');
+    if (activeIdx >= 0) el.querySelector(`[data-tl-seg="${activeIdx}"]`)?.setAttribute('data-on', '1');
+    const prevRow = document.querySelector('[data-cap-row][data-on]');
+    if (prevRow) prevRow.removeAttribute('data-on');
+    if (activeIdx >= 0) document.querySelector(`[data-cap-row="${activeIdx}"]`)?.setAttribute('data-on', '1');
+  }, [activeIdx, tlBlocks, tlMode]);
 
   if (loading) return (<div className="fixed inset-0 z-50 grid place-items-center" style={{ background: 'var(--editor-bg)' }}><Loader2 className="animate-spin" style={{ color: 'var(--accent)' }} size={30} /></div>);
+
+  /* ── My Animations panel (shared by the Transitions and My Presets tabs) ── */
+  const applyTransition = (id: string) => {
+    if (trMode === 'line') {
+      if (trScope === 'line' && selLine >= 0) patchLine(selLine, { transition: id });
+      else {
+        patchGlobal({ transition: id });
+        // "Apply to All": clear per-line overrides so it's truly universal
+        setSegments((prev) => prev.map((s) => (s.style?.transition !== undefined ? { ...s, style: { ...s.style, transition: undefined } } : s)));
+      }
+    } else {
+      if (selWords.size) patchWords({ wordTransition: id } as any); else patchGlobal({ wordTransition: id });
+    }
+    previewFromHere(trMode === 'line' && trScope === 'line' && selLine >= 0 ? selLine : undefined);
+  };
+
+  const currentTransitionId = trMode === 'line'
+    ? (trScope === 'line' && selLine >= 0 ? effLine(selLine).transition : style.transition)
+    : style.wordTransition;
+
+  const MyAnimations = (
+    <div className="space-y-3">
+      <input ref={animInputRef} type="file" accept=".css,text/css" className="hidden" onChange={(e) => addAnimation(e.target.files?.[0] || null)} />
+      <div className="flex items-center justify-between gap-2">
+        <div>
+          <p className="text-sm font-bold">My Animations</p>
+          <p className="text-[11px]" style={{ color: 'var(--text-muted)' }}>Upload your own animation and apply it to captions</p>
+        </div>
+        <button onClick={() => animInputRef.current?.click()} disabled={animBusy} className="btn-primary !px-3 !py-2 text-xs disabled:opacity-60">
+          {animBusy ? <Loader2 size={14} className="animate-spin" /> : <Upload size={14} />} Upload
+        </button>
+      </div>
+
+      {customAnims.length === 0 ? (
+        <div className="surface p-3 text-left" style={{ background: 'var(--editor-panel)' }}>
+          <p className="text-[11px] leading-relaxed" style={{ color: 'var(--text-muted)' }}>
+            Built an animation in After Effects or another tool? Export/save it as a <b>.css</b> file with an
+            <code> @keyframes </code> rule and upload it here — it then works exactly like a built-in
+            transition, on whole lines or on single words, and is burned into your exported video.
+          </p>
+          <pre className="mt-2 overflow-x-auto rounded-lg p-2 text-[10px] leading-tight" style={{ background: 'var(--editor-surface)', color: 'var(--text-muted)' }}>{`@keyframes myBounce {
+  0%   { opacity: 0; transform: translateY(40px) scale(.6); }
+  60%  { opacity: 1; transform: translateY(-8px) scale(1.1); }
+  100% { opacity: 1; transform: translateY(0) scale(1); }
+}`}</pre>
+        </div>
+      ) : (
+        <div className="grid grid-cols-3 gap-3">
+          {customAnims.map((a) => {
+            const id = customAnimId(a.id);
+            const on = currentTransitionId === id;
+            return (
+              <div key={a.id} className="relative">
+                <button onClick={() => applyTransition(id)}
+                  className="grid aspect-square w-full place-items-center gap-1.5 rounded-2xl border p-2 text-center transition"
+                  style={{ background: 'var(--editor-panel)', borderColor: on ? 'var(--accent)' : 'transparent' }}>
+                  <span key={`${a.id}-${bump}`} className={animClass(id)} style={{ animationDuration: '.6s' }}>
+                    <Film size={18} style={{ color: on ? 'var(--accent)' : 'var(--text-muted)' }} />
+                  </span>
+                  <span className="line-clamp-2 text-[10px] font-semibold leading-tight" style={{ color: on ? 'var(--accent)' : 'var(--text-muted)' }}>{a.name}</span>
+                </button>
+                <button onClick={() => removeAnimation(a)} title="Delete animation"
+                  className="absolute -right-1.5 -top-1.5 grid h-5 w-5 place-items-center rounded-full"
+                  style={{ background: 'var(--editor-surface)', border: '1px solid var(--editor-border)', color: '#ef4444' }}>
+                  <X size={11} />
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
 
   /* ── Caption Tools dropdown ── */
   const ToolsPanel = (
@@ -963,24 +1431,7 @@ export default function EditorPage() {
       </div>
       {showTools && ToolsPanel}
       <div className="editor-scroll min-h-0 flex-1 space-y-1 overflow-y-auto px-3 pb-4">
-        {filtered.map(({ s, i }) => {
-          const on = i === activeIdx, sel = i === selLine;
-          return (
-            <div key={s.id} onClick={() => { setSelLine(i); setSelWords(new Set()); seekTo(s.start); }}
-              className="group flex cursor-pointer items-center gap-3 rounded-2xl border px-3 py-3 transition"
-              style={{ background: sel ? 'rgba(79,140,255,.10)' : 'transparent', borderColor: sel ? 'var(--accent)' : 'transparent' }}>
-              <span className="grid h-7 w-7 shrink-0 place-items-center rounded-full text-[11px] font-bold"
-                style={{ background: on ? 'var(--accent)' : 'transparent', color: on ? '#fff' : 'var(--text-muted)', border: on ? 'none' : '1px solid var(--editor-border)' }}>{i + 1}</span>
-              <input value={shown(s)} onChange={(e) => updateText(i, e.target.value)} onFocus={() => { setSelLine(i); setSelWords(new Set()); }}
-                className="flex-1 bg-transparent text-[15px] outline-none" style={{ fontFamily: withScript("'Inter',sans-serif") }} />
-              <button onClick={(e) => { e.stopPropagation(); setLineStylingFor(i); setCollapsed((c) => ({ ...c, typo: true })); }}
-                title="Line styling" className="shrink-0 rounded-md p-1.5 transition" style={{ color: 'var(--text-muted)' }}>
-                <LayoutGrid size={17} />
-              </button>
-              <button onClick={(e) => { e.stopPropagation(); removeSeg(i); }} className="shrink-0 opacity-0 transition group-hover:opacity-100" style={{ color: '#ef4444' }}><Trash2 size={14} /></button>
-            </div>
-          );
-        })}
+        {capRows}
       </div>
     </div>
   );
@@ -1243,6 +1694,9 @@ export default function EditorPage() {
                 );
               })}
             {tplTab === 'presets' && presets.length === 0 && <p className="py-8 text-center text-sm" style={{ color: 'var(--text-muted)' }}>No presets yet. Style a caption, then “Save preset”.</p>}
+            {tplTab === 'presets' && (
+              <div className="border-t pt-4" style={{ borderColor: 'var(--editor-border)' }}>{MyAnimations}</div>
+            )}
           </div>
         )}
 
@@ -1262,24 +1716,9 @@ export default function EditorPage() {
             {trMode === 'word' && selWords.size === 0 && <p className="text-xs" style={{ color: '#f5b74f' }}>Please select one or more words to apply animations</p>}
             <div className="grid grid-cols-3 gap-3">
               {TRANSITIONS.map((tr) => {
-                const cur = trMode === 'line'
-                  ? (trScope === 'line' && selLine >= 0 ? effLine(selLine).transition : style.transition)
-                  : style.wordTransition;
-                const on = cur === tr.id;
+                const on = currentTransitionId === tr.id;
                 return (
-                  <button key={tr.id} onClick={() => {
-                    if (trMode === 'line') {
-                      if (trScope === 'line' && selLine >= 0) patchLine(selLine, { transition: tr.id });
-                      else {
-                        patchGlobal({ transition: tr.id });
-                        // "Apply to All": clear per-line transition overrides so it's truly universal
-                        setSegments((prev) => prev.map((s) => (s.style?.transition !== undefined ? { ...s, style: { ...s.style, transition: undefined } } : s)));
-                      }
-                    } else {
-                      if (selWords.size) patchWords({ wordTransition: tr.id } as any); else patchGlobal({ wordTransition: tr.id });
-                    }
-                    previewFromHere(trMode === 'line' && trScope === 'line' && selLine >= 0 ? selLine : undefined);
-                  }}
+                  <button key={tr.id} onClick={() => applyTransition(tr.id)}
                     className="grid aspect-square place-items-center gap-1.5 rounded-2xl border p-2 text-center transition"
                     style={{ background: 'var(--editor-panel)', borderColor: on ? 'var(--accent)' : 'transparent' }}>
                     <TrIcon id={tr.id} on={on} />
@@ -1288,6 +1727,8 @@ export default function EditorPage() {
                 );
               })}
             </div>
+
+            <div className="border-t pt-4" style={{ borderColor: 'var(--editor-border)' }}>{MyAnimations}</div>
             <div className="flex items-center justify-between pt-2">
               <div><p className="text-sm font-semibold" style={{ color: 'var(--text-muted)' }}>Speed Mode <span style={{ color: 'var(--accent)' }}>● {style.speedMode === 'dynamic' ? 'Dynamic' : 'Manual'}</span></p>
                 <p className="text-[11px]" style={{ color: 'var(--text-muted)' }}>{style.speedMode === 'dynamic' ? 'Automatically calculated based on timing' : 'Set your preferred speed manually'}</p></div>
@@ -1339,68 +1780,6 @@ export default function EditorPage() {
     </div>
   );
 
-  /* ── timeline blocks ── */
-  const fitW = wrapBox.w && wrapBox.h ? Math.max(220, Math.min(wrapBox.w, wrapBox.h * vRatio)) : 640;
-  const fitH = fitW / vRatio;
-
-  const toggleWord = (key: string, additive: boolean) => {
-    setSelLine(-1);
-    setSelWords((prev) => {
-      const n = new Set(additive ? prev : []);
-      if (prev.has(key) && additive) n.delete(key); else n.add(key);
-      return n;
-    });
-  };
-
-  /* drag a caption block's edge in the timeline to change its start/end time */
-  const startEdge = (e: React.PointerEvent, i: number, side: 'start' | 'end') => {
-    e.stopPropagation(); e.preventDefault();
-    const s0 = segments[i]; if (!s0) return;
-    const sx = e.clientX; const st0 = s0.start, en0 = s0.end;
-    const apply = (ev: PointerEvent) => {
-      const dt = (ev.clientX - sx) / pxPerSec;
-      setSegments((prev) => prev.map((s, x) => {
-        if (x !== i) return s;
-        if (side === 'start') return { ...s, start: Math.max(0, Math.min(en0 - 0.15, st0 + dt)) };
-        return { ...s, end: Math.min(totalDur, Math.max(st0 + 0.15, en0 + dt)) };
-      }));
-    };
-    let raf = 0; let last: PointerEvent | null = null;
-    const move = (ev: PointerEvent) => { last = ev; if (!raf) raf = requestAnimationFrame(() => { raf = 0; if (last) apply(last); }); };
-    const up = () => { if (raf) cancelAnimationFrame(raf); window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); markDirty(); };
-    window.addEventListener('pointermove', move); window.addEventListener('pointerup', up);
-  };
-
-  /* drag the middle of a caption block to SHIFT it in time (snaps to neighbours).
-     A click without movement selects + seeks instead. */
-  const startMove = (e: React.PointerEvent, i: number) => {
-    e.stopPropagation();
-    const s0 = segments[i]; if (!s0) return;
-    const sx = e.clientX; const st0 = s0.start; const dur = s0.end - s0.start;
-    let moved = false;
-    const apply = (ev: PointerEvent) => {
-      const dx = ev.clientX - sx;
-      if (Math.abs(dx) > 3) moved = true;
-      if (!moved) return;
-      let ns = st0 + dx / pxPerSec;
-      const prevEnd = segments[i - 1]?.end ?? 0;
-      const nextStart = segments[i + 1]?.start ?? totalDur;
-      if (Math.abs(ns - prevEnd) < 0.12) ns = prevEnd;                    // snap to previous block
-      if (Math.abs(ns + dur - nextStart) < 0.12) ns = nextStart - dur;    // snap to next block
-      ns = Math.max(0, Math.min(totalDur - dur, ns));
-      setSegments((prev) => prev.map((s, x) => (x === i ? { ...s, start: ns, end: ns + dur } : s)));
-    };
-    let raf = 0; let last: PointerEvent | null = null;
-    const move = (ev: PointerEvent) => { last = ev; if (!raf) raf = requestAnimationFrame(() => { raf = 0; if (last) apply(last); }); };
-    const up = () => {
-      if (raf) cancelAnimationFrame(raf);
-      window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up);
-      if (moved) markDirty();
-      else { setSelLine(i); setSelWords(new Set()); seekTo(segments[i].start); }
-    };
-    window.addEventListener('pointermove', move); window.addEventListener('pointerup', up);
-  };
-
   return (
     <div className="fixed inset-0 z-50 flex flex-col" style={{ background: 'var(--editor-bg)', color: 'var(--text)' }}>
       <header className="flex items-center justify-between gap-3 border-b px-3 py-2.5 sm:px-4" style={{ borderColor: 'var(--editor-border)', background: 'var(--editor-surface)' }}>
@@ -1422,7 +1801,7 @@ export default function EditorPage() {
             <main className="flex min-w-0 flex-1 flex-col overflow-hidden p-3 sm:p-4">
             <div ref={wrapRef} className="flex min-h-0 flex-1 items-center justify-center">
             <div ref={stageRef} className="relative overflow-hidden rounded-2xl border bg-black" style={{ borderColor: 'var(--editor-border)', width: fitW, height: fitH }}>
-              {project?.videoUrl ? (<><video ref={videoRef} src={project.videoUrl} crossOrigin="anonymous" onClick={togglePlay} playsInline className="h-full w-full cursor-pointer object-contain" /><canvas ref={canvasRef} className="hidden" /></>)
+              {project?.videoUrl ? (<><video ref={videoRef} src={project.videoUrl} crossOrigin="anonymous" preload="auto" onClick={togglePlay} playsInline disablePictureInPicture className="h-full w-full cursor-pointer object-contain" /><canvas ref={canvasRef} className="hidden" /></>)
                 : (<div className="grid h-full place-items-center text-sm" style={{ color: 'var(--text-muted)' }}>Video preview unavailable</div>)}
               {!playing && project?.videoUrl && (
                 <button onClick={togglePlay} className="absolute inset-0 z-[4] grid place-items-center transition hover:opacity-90" style={{ background: 'rgba(0,0,0,.18)' }}>
@@ -1431,10 +1810,11 @@ export default function EditorPage() {
               )}
               <div className="absolute left-3 top-3"><span className="flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-semibold" style={{ background: 'rgba(0,0,0,.55)', color: '#fff' }}><RotateCcw size={12} /> Replace</span></div>
               <div className="absolute right-3 top-3"><span className="rounded-full px-3 py-1 text-xs font-semibold" style={{ background: 'rgba(0,0,0,.55)', color: '#f5b74f' }}>● Low-res</span></div>
+              <PerfHud videoRef={videoRef} segments={segments.length} />
 
               {activeSeg && activeWords.length > 0 && (
                 <div key={`${activeIdx}-${lineSt.transition}-${bump}`} style={overlayWrap} onPointerDown={onCapPointerDown} title="Drag to reposition">
-                  <span className={lineAnim} style={{ ...boxStyle, animationDuration: `${animDur(lineSt, activeSeg)}s` }}>
+                  <span className={lineAnim} style={{ ...boxStyle, animationDuration: `${animDur(lineSt, activeSeg, lineSt.transition)}s` }}>
                     {activeWords.map((w) => {
                       const ws = wordStyles[w.key] || {};
                       const wtr = (ws as any).wordTransition || style.wordTransition;
@@ -1446,7 +1826,7 @@ export default function EditorPage() {
                       return (
                         <span
                           key={w.key}
-                          className={ANIM[wtr] || ''}
+                          className={animClass(wtr)}
                           onClick={(e) => {
                             e.stopPropagation();
                             if (dragMovedRef.current) return; // it was a drag, not a click
@@ -1455,6 +1835,7 @@ export default function EditorPage() {
                           style={{
                             ...wordSpan(w),
                             cursor: 'pointer', pointerEvents: 'auto',
+                            animationDuration: `${animDur(lineSt, activeSeg || undefined, wtr)}s`,
                             ...(wSel ? { outline: '1.5px dashed var(--accent)', outlineOffset: 2, borderRadius: 4 } : {}),
                             ...(wtr && wtr !== 'none' ? { animationDelay: `${delay.toFixed(3)}s` } : {}),
                           }}
@@ -1486,16 +1867,17 @@ export default function EditorPage() {
 
             <div className="mx-auto mt-3 w-full max-w-2xl shrink-0 rounded-2xl border px-3 pb-2.5 pt-2.5" style={{ borderColor: 'var(--editor-border)', background: 'var(--editor-surface)' }}>
               <input
-                type="range" min={0} max={totalDur || 1} step={0.01} value={Math.min(current, totalDur || 1)}
+                ref={seekRef}
+                type="range" min={0} max={totalDur || 1} step={0.01} defaultValue={0}
                 onChange={(e) => seekTo(Number(e.target.value))}
                 className="seekbar mb-2.5 w-full"
-                style={{ background: `linear-gradient(to right, var(--text) ${((Math.min(current, totalDur || 1)) / (totalDur || 1)) * 100}%, var(--editor-border) 0%)` }}
+                style={{ background: 'linear-gradient(to right, var(--text) 0%, var(--editor-border) 0%)' }}
               />
               <div className="flex items-center gap-3">
                 <button onClick={togglePlay} className="grid h-10 w-10 shrink-0 place-items-center rounded-full" style={{ background: 'var(--accent)', color: '#fff' }}>{playing ? <Pause size={18} /> : <Play size={18} className="ml-0.5" />}</button>
               <button onClick={toggleMute} className="grid h-10 w-10 shrink-0 place-items-center rounded-full" style={{ background: 'var(--editor-panel)' }}>{muted ? <VolumeX size={16} /> : <Volume2 size={16} />}</button>
               <div className="surface px-4 py-2 font-mono text-xs tabular-nums" style={{ background: 'var(--editor-panel)', color: 'var(--text-muted)' }}>
-                <span style={{ color: 'var(--text)' }}>{tc(current)}</span> / {tc(totalDur)}
+                <span ref={clockRef} style={{ color: 'var(--text)' }}>{tc(0)}</span> / {tc(totalDur)}
               </div>
               <div className="flex-1" />
               <button onClick={fs} className="grid h-10 w-10 shrink-0 place-items-center rounded-full" style={{ background: 'var(--editor-panel)' }}><Maximize2 size={16} /></button>
@@ -1515,8 +1897,8 @@ export default function EditorPage() {
               </div>
               <button onClick={addLine} className="btn-ghost !px-3 !py-1.5 text-xs"><Plus size={14} /> {tlMode === 'line' ? 'Line' : 'Word'}</button>
               <div className="mx-1 h-6 w-px" style={{ background: 'var(--editor-border)' }} />
-              <button onClick={() => { const s = [...segments].reverse().find((x) => x.end < current); if (s) seekTo(s.start); }} className="grid h-8 w-8 place-items-center rounded-lg" style={{ background: 'var(--editor-panel)' }}><ChevronLeft size={15} /></button>
-              <button onClick={() => { const s = segments.find((x) => x.start > current); if (s) seekTo(s.start); }} className="grid h-8 w-8 place-items-center rounded-lg" style={{ background: 'var(--editor-panel)' }}><ChevronRight size={15} /></button>
+              <button onClick={() => { const s = [...segments].reverse().find((x) => x.end < currentRef.current); if (s) seekTo(s.start); }} className="grid h-8 w-8 place-items-center rounded-lg" style={{ background: 'var(--editor-panel)' }}><ChevronLeft size={15} /></button>
+              <button onClick={() => { const s = segments.find((x) => x.start > currentRef.current); if (s) seekTo(s.start); }} className="grid h-8 w-8 place-items-center rounded-lg" style={{ background: 'var(--editor-panel)' }}><ChevronRight size={15} /></button>
               <button onClick={() => { if (selLine >= 0) removeSeg(selLine); }} className="grid h-8 w-8 place-items-center rounded-lg" style={{ background: 'var(--editor-panel)' }}><Trash2 size={15} /></button>
               <div className="ml-auto flex items-center gap-2">
                 <button onClick={() => setPxPerSec((z) => Math.max(4, z - 8))} className="grid h-8 w-8 place-items-center rounded-lg" style={{ background: 'var(--editor-panel)' }}><ZoomOut size={15} /></button>
@@ -1532,46 +1914,11 @@ export default function EditorPage() {
                 <div className="relative" style={{ width: tlWidth, minHeight: 190 }}>
                   {rulerRow}
 
-                  <div className="relative h-[72px] border-b" style={{ borderColor: 'var(--editor-border)' }}>
-                    {tlMode === 'word'
-                      ? allWords.map((w) => {
-                          const sel = selWords.has(w.key);
-                          const live = current >= w.start && current <= w.end;
-                          const em = !!(wordStyles[w.key] as any)?.emphasized;
-                          return (
-                            <button key={w.key} onClick={(e) => { e.stopPropagation(); toggleWord(w.key, e.metaKey || e.ctrlKey || e.shiftKey); seekTo(w.start); }}
-                              className="absolute top-4 flex items-center justify-center overflow-hidden rounded-md px-1 text-[10px] font-semibold"
-                              title={w.text}
-                              style={{ left: w.start * pxPerSec, width: Math.max(7, (w.end - w.start) * pxPerSec - 2), height: 40,
-                                background: em ? '#C8FF00' : 'var(--editor-block)', color: em ? '#000' : 'var(--text)',
-                                outline: sel ? '2px solid var(--accent)' : live ? '1px solid var(--accent)' : 'none',
-                                fontFamily: withScript("'Inter',sans-serif") }}>
-                              <span className="truncate">{w.text}</span>
-                            </button>
-                          );
-                        })
-                      : segments.map((s, i) => {
-                          const on = i === activeIdx, sel = i === selLine;
-                          return (
-                            <div key={s.id} onClick={(e) => e.stopPropagation()}
-                              className="absolute top-3 flex items-stretch rounded-lg text-[10px] font-semibold" title={s.text}
-                              style={{ left: s.start * pxPerSec, width: Math.max(14, (s.end - s.start) * pxPerSec - 2), height: 44,
-                                background: on ? 'var(--accent)' : 'linear-gradient(180deg, rgba(79,140,255,.30), rgba(79,140,255,.14))',
-                                border: on ? '1px solid var(--accent)' : '1px solid rgba(79,140,255,.35)',
-                                color: on ? '#fff' : 'var(--text)',
-                                boxShadow: sel ? '0 0 0 2px var(--accent), 0 4px 14px rgba(0,0,0,.35)' : '0 2px 8px rgba(0,0,0,.2)',
-                                fontFamily: withScript("'Inter',sans-serif") }}>
-                              <span onPointerDown={(e) => startEdge(e, i, 'start')} className="w-2 shrink-0 cursor-ew-resize rounded-l-lg" style={{ background: 'rgba(255,255,255,.22)' }} />
-                              <span onPointerDown={(e) => startMove(e, i)} className="flex min-w-0 flex-1 cursor-grab items-center px-1.5 active:cursor-grabbing"><span className="truncate">{shown(s)}</span></span>
-                              <span onPointerDown={(e) => startEdge(e, i, 'end')} className="w-2 shrink-0 cursor-ew-resize rounded-r-lg" style={{ background: 'rgba(255,255,255,.22)' }} />
-                            </div>
-                          );
-                        })}
-                  </div>
+                  <div className="relative h-[72px] border-b" style={{ borderColor: 'var(--editor-border)' }}>{tlBlocks}</div>
 
                   {waveRow}
 
-                  <div ref={playheadRef} className="pointer-events-none absolute inset-y-0 z-10" style={{ left: 0, transform: `translateX(${current * pxPerSec}px)`, willChange: 'transform' }}>
+                  <div ref={playheadRef} className="pointer-events-none absolute inset-y-0 z-10" style={{ left: 0, transform: 'translateX(0px)', willChange: 'transform' }}>
                     <div className="h-full w-0.5" style={{ background: 'var(--accent)', boxShadow: '0 0 10px var(--accent)' }} />
                     <div className="absolute -left-2 -top-0.5 h-3.5 w-4" style={{ background: 'var(--accent)', clipPath: 'polygon(0 0,100% 0,50% 100%)' }} />
                   </div>
@@ -1615,6 +1962,110 @@ export default function EditorPage() {
 }
 
 /* ══════════════════════ UI atoms ══════════════════════ */
+
+/**
+ * Playback profiler. Add ?perf=1 to the editor URL to show it.
+ *
+ * It separates the three things that look identical to a viewer ("the video
+ * keeps sticking") but have completely different fixes:
+ *   decode   — dropped frames: the file is too heavy for this machine to decode
+ *   network  — buffered-ahead seconds falling to ~0: it is still downloading
+ *   main     — long-task milliseconds per second: JavaScript is blocking paint
+ */
+function PerfHud({ videoRef, segments }: { videoRef: React.RefObject<HTMLVideoElement>; segments: number }) {
+  const [on, setOn] = useState(false);
+  const [s, setS] = useState({ fps: 0, dropped: 0, total: 0, ahead: 0, blocked: 0, res: '', stalls: 0 });
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    setOn(new URLSearchParams(window.location.search).get('perf') === '1');
+  }, []);
+  useEffect(() => {
+    if (!on) return;
+    let blocked = 0, stalls = 0, raf = 0, last = performance.now(), frames = 0, lastT = 0;
+    let po: PerformanceObserver | null = null;
+    try {
+      po = new PerformanceObserver((l) => { for (const e of l.getEntries()) blocked += e.duration; });
+      po.observe({ entryTypes: ['longtask'] });
+    } catch {}
+    const v = videoRef.current;
+    const onWait = () => { stalls++; };
+    v?.addEventListener('waiting', onWait);
+    v?.addEventListener('stalled', onWait);
+    const tick = () => {
+      frames++;
+      const now = performance.now();
+      if (now - last >= 1000) {
+        const vid = videoRef.current;
+        let ahead = 0;
+        if (vid) {
+          for (let i = 0; i < vid.buffered.length; i++) {
+            if (vid.currentTime >= vid.buffered.start(i) && vid.currentTime <= vid.buffered.end(i)) {
+              ahead = vid.buffered.end(i) - vid.currentTime; break;
+            }
+          }
+        }
+        const q = vid?.getVideoPlaybackQuality?.();
+        setS({
+          fps: Math.round((frames * 1000) / (now - last)),
+          dropped: q?.droppedVideoFrames ?? 0,
+          total: q?.totalVideoFrames ?? 0,
+          ahead: Math.round(ahead),
+          blocked: Math.round(blocked),
+          stalls,
+          res: vid ? `${vid.videoWidth}×${vid.videoHeight}` : '',
+        });
+        blocked = 0; frames = 0; last = now; lastT = vid?.currentTime ?? 0;
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => {
+      cancelAnimationFrame(raf); po?.disconnect();
+      v?.removeEventListener('waiting', onWait); v?.removeEventListener('stalled', onWait);
+    };
+  }, [on, videoRef]);
+  if (!on) return null;
+  const warn = (bad: boolean) => ({ color: bad ? '#ff6b6b' : '#8ef58e' });
+  return (
+    <div className="absolute bottom-3 left-3 z-[9] rounded-lg px-3 py-2 font-mono text-[11px] leading-relaxed"
+      style={{ background: 'rgba(0,0,0,.78)', color: '#ddd', pointerEvents: 'none' }}>
+      <div>source {s.res} · {segments} captions</div>
+      <div>decode  <span style={warn(s.total > 0 && s.dropped / s.total > 0.02)}>{s.dropped}/{s.total} dropped</span></div>
+      <div>network <span style={warn(s.ahead < 3)}>{s.ahead}s buffered</span> · {s.stalls} stalls</div>
+      <div>main    <span style={warn(s.blocked > 150)}>{s.blocked} ms/s blocked</span> · {s.fps} fps</div>
+    </div>
+  );
+}
+
+/** Timeline waveform, painted once to a canvas instead of ~2 400 DOM nodes. */
+function WaveRow({ width, seconds }: { width: number; seconds: number }) {
+  const ref = useRef<HTMLCanvasElement>(null);
+  useEffect(() => {
+    const c = ref.current; if (!c) return;
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    const h = 80;
+    c.width = Math.max(1, Math.floor(width * dpr));
+    c.height = Math.floor(h * dpr);
+    const ctx = c.getContext('2d'); if (!ctx) return;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, width, h);
+    const bars = Math.max(40, Math.min(1400, Math.floor(width / 4)));
+    const hs = waveHeights(bars);
+    const bw = Math.max(1.5, width / bars - 2);
+    const grad = ctx.createLinearGradient(0, 0, 0, h);
+    grad.addColorStop(0, 'rgba(79,140,255,1)');
+    grad.addColorStop(1, 'rgba(79,140,255,.4)');
+    ctx.fillStyle = grad;
+    for (let i = 0; i < bars; i++) {
+      const bh = hs[i] * h;
+      const x = (i * width) / bars;
+      const r = Math.min(bw / 2, 3);
+      roundRect(ctx, x, (h - bh) / 2, bw, bh, r);
+      ctx.fill();
+    }
+  }, [width, seconds]);
+  return <canvas ref={ref} className="block h-20" style={{ width, background: 'var(--editor-panel)' }} />;
+}
 
 function Group({ title, open, onToggle, children }: { title: string; open: boolean; onToggle: () => void; children: React.ReactNode }) {
   return (
