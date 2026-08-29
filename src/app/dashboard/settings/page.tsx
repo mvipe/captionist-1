@@ -74,7 +74,7 @@ export default function SettingsPage() {
           <h2 className="text-lg font-bold">Personal details</h2>
         </div>
         <div className="grid gap-4 sm:grid-cols-2">
-          <Field label="Full Name">
+          <Field label="Full name">
             <input className="input" value={name} onChange={(e) => setName(e.target.value)} />
           </Field>
           <Field label="Phone">

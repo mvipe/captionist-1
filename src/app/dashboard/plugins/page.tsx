@@ -26,7 +26,7 @@ const PLUGINS = [
   },
   {
     name: 'CapCut',
-    desc: 'One-tap export of SRT + sticker captions optimised for CapCut mobile & desktop.',
+    desc: 'One-tap export of SRT + sticker captions optimized for CapCut mobile & desktop.',
     version: 'v1.2.0',
     color: '#34d399',
     tag: 'Mobile',
@@ -39,7 +39,7 @@ export default function PluginsPage() {
       <div>
         <h1 className="text-3xl font-extrabold">Manage Plugins</h1>
         <p className="mt-2 text-sm" style={{ color: 'var(--text-muted)' }}>
-          Install YesEditor extensions for your favourite editor and keep captions perfectly in sync.
+          Install YesEditor extensions for your favorite editor and keep captions perfectly in sync.
         </p>
       </div>
 

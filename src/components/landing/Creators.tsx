@@ -10,7 +10,7 @@ export function Creators({ creators }: { creators: Creator[] }) {
     <section className="py-20">
       <div className="container-page text-center">
         <h2 className="text-4xl font-extrabold tracking-tight md:text-5xl">
-          Powering teams of your <span className="gradient-text">Favourite Creators</span>
+          Powering teams of your <span className="gradient-text">Favorite Creators</span>
         </h2>
         <div className="mt-14 flex flex-wrap items-center justify-center gap-x-10 gap-y-8">
           {creators.map((c) => (

@@ -58,7 +58,7 @@ export function ExportNLE() {
         </h2>
         <p className="mx-auto mt-5 max-w-2xl" style={{ color: 'var(--text-muted)' }}>
           For all the Pro-Editors, <strong style={{ color: 'var(--text)' }}>cross NLE support available</strong> to
-          bring captions back locally in your own software of choice, both as Alpha channel or as an SRT File.
+          bring captions back locally in your own software of choice, either as an Alpha channel or as an SRT file.
         </p>
         <div className="mt-10 flex justify-center">
           <Link href="/sign-in" className="btn-primary shadow-glow">

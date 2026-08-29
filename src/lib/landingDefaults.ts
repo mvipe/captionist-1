@@ -19,7 +19,7 @@ export const DEFAULT_TESTIMONIALS: Testimonial[] = [
     id: 't3',
     name: 'Muhammad Ozair',
     handle: '@ozair.films',
-    text: 'YesEditor as a captioning software is one of the best out there. The premade templates are really helpful & loading times are really quick. Overall it makes captioning so much easier.',
+    text: 'YesEditor as captioning software is one of the best out there. The premade templates are really helpful & loading times are really quick. Overall it makes captioning so much easier.',
     order: 3,
   },
   {
@@ -56,7 +56,7 @@ export const DEFAULT_CREATORS: Creator[] = [
 
 export const LANGUAGES = [
   'Hindi', 'English', 'Nepali', 'Urdu', 'Tamil', 'Malayalam', 'Gujarati',
-  'Bengali', 'Punjabi', 'Telugu', 'Sindhi', 'Marathi', 'Kannada', 'Pushto', 'Malay',
+  'Bengali', 'Punjabi', 'Telugu', 'Sindhi', 'Marathi', 'Kannada', 'Pashto', 'Malay',
 ];
 
 export const FAQ_ITEMS = [
@@ -77,7 +77,7 @@ export const FAQ_ITEMS = [
     a: 'Studio plans support team billing with a single invoice and seat management from the subscription panel.',
   },
   {
-    q: 'What is available in Free Plan?',
+    q: 'What is available in the Free plan?',
     a: 'The Free plan includes all languages, 5 minutes of transcription, 5 GB storage and basic templates so you can try YesEditor end-to-end.',
   },
   {

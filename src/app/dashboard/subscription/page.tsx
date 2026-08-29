@@ -131,7 +131,7 @@ export default function SubscriptionPage() {
                     onClick={() => router.push(`/checkout?plan=${p.id}&billing=${billing}`)}
                     className={current ? 'btn-ghost mt-5 w-full !py-2.5 text-sm' : 'btn-primary mt-5 w-full !py-2.5 text-sm'}
                   >
-                    {current ? 'Current Plan' : p.id === 'free' ? 'Free' : 'Choose plan'}
+                    {current ? 'Current Plan' : p.id === 'free' ? 'Free' : 'Choose Plan'}
                   </button>
                 </div>
               );

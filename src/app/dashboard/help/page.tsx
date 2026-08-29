@@ -35,7 +35,7 @@ export default function HelpPage() {
       </div>
 
       <div>
-        <h2 className="mb-4 text-xl font-bold">Frequently asked questions</h2>
+        <h2 className="mb-4 text-xl font-bold">Frequently Asked Questions</h2>
         <div className="space-y-3">
           {FAQ_ITEMS.map((item, i) => (
             <div key={i} className="surface overflow-hidden">

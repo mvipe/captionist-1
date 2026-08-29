@@ -19,7 +19,7 @@ export default function Pricing() {
     <section id="pricing" className="py-20">
       <div className="container-page">
         <h2 className="text-center text-4xl font-extrabold tracking-tight md:text-5xl">
-          <span className="gradient-text">Unbeatable Pricing</span> Across Industry
+          <span className="gradient-text">Unbeatable Pricing</span> Across the Industry
         </h2>
 
         <div className="mt-10 flex items-center justify-center gap-3">

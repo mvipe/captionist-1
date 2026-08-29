@@ -69,7 +69,7 @@ export default function Uploader({ onDone }: { onDone?: () => void }) {
         console.warn('[uploader] audio extraction failed:', err);
         if (file.size > 24 * 1024 * 1024) {
           task.cancel();
-          throw new Error('Could not decode this video\'s audio in the browser — the file may be too large for this device\'s memory, or uses an unsupported codec. Try desktop Chrome, or a standard H.264/AAC MP4.');
+          throw new Error('Could not decode this video\'s audio in the browser — the file may be too large for this device\'s memory, or may use an unsupported codec. Try desktop Chrome, or a standard H.264/AAC MP4.');
         }
         chunks = null; // small file → legacy direct path below
       }

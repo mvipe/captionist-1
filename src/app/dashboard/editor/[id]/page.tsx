@@ -27,6 +27,10 @@ import {
 interface Seg {
   id: number; start: number; end: number; text: string;
   style?: Partial<CapStyle>;
+  /** How many rows this caption is laid out across. Set by the "Lines" control
+   *  in Caption Tools; 1 (or undefined) means a single row that wraps only if
+   *  it runs out of box width. */
+  lines?: number;
 }
 interface CapStyle {
   fontFamily: string; fontWeight: number; fontSize: number;
@@ -125,6 +129,32 @@ const animClass = (id?: string) => {
 
 /* ══════════════════════ helpers ══════════════════════ */
 
+/** Seek and resolve only once a frame for that position has really been
+ *  decoded, so whatever draws next gets picture rather than blank canvas. */
+function seekToFrame(v: HTMLVideoElement, t: number): Promise<void> {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      v.removeEventListener('seeked', onSeeked);
+      clearTimeout(timer);
+      resolve();
+    };
+    const onSeeked = () => {
+      // rVFC fires when a frame is actually presented; fall back to readyState.
+      const anyV = v as any;
+      if (typeof anyV.requestVideoFrameCallback === 'function') anyV.requestVideoFrameCallback(() => finish());
+      else if (v.readyState >= 2) finish();
+      else v.addEventListener('canplay', finish, { once: true });
+    };
+    const timer = setTimeout(finish, 4000);   // never hang the export on this
+    v.addEventListener('seeked', onSeeked);
+    if (Math.abs(v.currentTime - t) < 0.001 && v.readyState >= 2) { v.currentTime = t; onSeeked(); }
+    else v.currentTime = t;
+  });
+}
+
 const pad = (n: number, w = 2) => String(Math.floor(n)).padStart(w, '0');
 const srtTime = (t: number) => `${pad(t / 3600)}:${pad((t % 3600) / 60)}:${pad(t % 60)},${pad((t - Math.floor(t)) * 1000, 3)}`;
 const tc = (t: number) => `${pad(t / 3600)}:${pad((t % 3600) / 60)}:${pad(t % 60)}:${pad((t % 1) * 100)}`;
@@ -166,34 +196,50 @@ function roundRect(c: CanvasRenderingContext2D, x: number, y: number, w: number,
   c.beginPath(); c.moveTo(x + r, y); c.arcTo(x + w, y, x + w, y + h, r); c.arcTo(x + w, y + h, x, y + h, r);
   c.arcTo(x, y + h, x, y, r); c.arcTo(x, y, x + w, y, r); c.closePath();
 }
-/* split a segment into chunks of at most maxWords words (Kalakar word-style),
-   distributing timing proportionally by character count */
-function splitSegWords(s: Seg, maxWords: number): Seg[] {
+/** Distribute word tokens across `lines` rows as evenly as possible.
+ *  Used by BOTH the live overlay and the canvas export renderer so a caption
+ *  laid out over two lines looks the same in the preview and in the file. */
+function rowsOf<T>(items: T[], lines: number): T[][] {
+  const n = Math.max(1, Math.min(lines || 1, items.length || 1));
+  if (n <= 1) return [items];
+  const out: T[][] = [];
+  const per = Math.ceil(items.length / n);
+  for (let i = 0; i < items.length; i += per) out.push(items.slice(i, i + per));
+  return out.length ? out : [items];
+}
+
+/* Split a caption into chunks of `wordsPerLine × lines` words (Kalakar
+   word-style), distributing timing proportionally by character count.
+   `lines` is recorded on each chunk so the renderers know to stack it. */
+function splitSegWords(s: Seg, wordsPerLine: number, lines = 1): Seg[] {
+  const perCap = Math.max(1, wordsPerLine) * Math.max(1, lines);
   const words = s.text.trim().split(/\s+/).filter(Boolean);
-  if (words.length <= maxWords) return [s];
+  if (words.length <= perCap) return [{ ...s, lines }];
   const dur = Math.max(0.2, s.end - s.start);
   const totalChars = words.reduce((a, w) => a + w.length, 0) || 1;
   const chunks: string[][] = [];
-  for (let i = 0; i < words.length; i += maxWords) chunks.push(words.slice(i, i + maxWords));
+  for (let i = 0; i < words.length; i += perCap) chunks.push(words.slice(i, i + perCap));
   let t = s.start;
   return chunks.map((c, i) => {
     const chars = c.reduce((a, w) => a + w.length, 0);
     const sl = (chars / totalChars) * dur;
-    const seg: Seg = { id: s.id * 1000 + i, start: t, end: Math.min(s.end, t + sl), text: c.join(' '), style: s.style };
+    const seg: Seg = { id: s.id * 1000 + i, start: t, end: Math.min(s.end, t + sl), text: c.join(' '), style: s.style, lines };
     t += sl;
     return seg;
   });
 }
 
+/** Character-budget split: up to `maxChars` per line across `lines` lines. */
 function splitSeg(s: Seg, maxChars: number, lines: number): Seg[] {
-  const cap = Math.max(6, maxChars * lines); const text = s.text.trim();
-  if (text.length <= cap) return [s];
+  const cap = Math.max(6, maxChars) * Math.max(1, lines);
+  const text = s.text.trim();
+  if (text.length <= cap) return [{ ...s, lines }];
   const words = text.split(/\s+/); const chunks: string[] = []; let line = '';
   for (const w of words) { const t = line ? `${line} ${w}` : w; if (t.length > cap && line) { chunks.push(line); line = w; } else line = t; }
   if (line) chunks.push(line);
   const dur = Math.max(0.2, s.end - s.start); const total = chunks.reduce((a, c) => a + c.length, 0) || 1;
   let t = s.start;
-  return chunks.map((c, i) => { const sl = (c.length / total) * dur; const seg: Seg = { id: s.id * 1000 + i, start: t, end: Math.min(s.end, t + sl), text: c, style: s.style }; t += sl; return seg; });
+  return chunks.map((c, i) => { const sl = (c.length / total) * dur; const seg: Seg = { id: s.id * 1000 + i, start: t, end: Math.min(s.end, t + sl), text: c, style: s.style, lines }; t += sl; return seg; });
 }
 
 /* ══════════════════════ component ══════════════════════ */
@@ -236,6 +282,16 @@ export default function EditorPage() {
   const [bump, setBump] = useState(0);
 
   const [selLine, setSelLine] = useState(-1);
+  /* Multi-selection of captions. `selLine` stays the "primary" one (it drives
+     the per-line styling scope); `selLines` is everything highlighted, so a
+     range can be deleted in one go. */
+  const [selLines, setSelLines] = useState<Set<number>>(new Set());
+  const selAnchorRef = useRef(-1);
+  const selLinesRef = useRef<Set<number>>(new Set());
+  const selLineRef = useRef(-1);
+  const removeSelectedRef = useRef<() => void>(() => {});
+  const selectAllRef = useRef<() => void>(() => {});
+  const clearSelRef = useRef<() => void>(() => {});
   const [selWords, setSelWords] = useState<Set<string>>(new Set());
 
   /* explicit editing scope — defaults to ALL. Selecting words switches to word
@@ -276,6 +332,9 @@ export default function EditorPage() {
 
   const [mobilePanel, setMobilePanel] = useState<'none' | 'captions' | 'inspector'>('none');
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
+
+  useEffect(() => { selLinesRef.current = selLines; }, [selLines]);
+  useEffect(() => { selLineRef.current = selLine; }, [selLine]);
 
   const markDirty = () => setDirty(true);
   const isFree = (user?.plan || 'free') === 'free';
@@ -415,7 +474,7 @@ export default function EditorPage() {
         const raw: Seg[] = (p.transcript?.segments || []).map((s: any, i: number) => ({ id: s.id ?? i, start: s.start, end: s.end, text: s.text, style: s.style }));
         // Kalakar-style: 1-3 words per caption — auto-split any longer segments
         const needsSplit = raw.some((s) => s.text.trim().split(/\s+/).length > 3);
-        setSegments(needsSplit ? raw.flatMap((s) => splitSegWords(s, 3)) : raw);
+        setSegments(needsSplit ? raw.flatMap((s) => splitSegWords(s, 3, 1)) : raw);
         if (p.style) setStyle({ ...DEFAULT_STYLE, ...p.style });
         if (p.wordStyles) setWordStyles(p.wordStyles);
         setDuration(p.durationSeconds || 0);
@@ -423,6 +482,25 @@ export default function EditorPage() {
       setLoading(false);
     })();
   }, [id, router]);
+
+  /* Keyboard shortcuts for the caption selection. Ignored while the caret is
+     in a text field so editing a caption still works normally. */
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const el = document.activeElement as HTMLElement | null;
+      const typing = !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable);
+      if (typing) return;
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        if (selLinesRef.current.size || selLineRef.current >= 0) { e.preventDefault(); removeSelectedRef.current(); }
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a') {
+        e.preventDefault(); selectAllRef.current();
+      } else if (e.key === 'Escape') {
+        clearSelRef.current();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
 
   const totalDur = useMemo(() => duration || segments[segments.length - 1]?.end || 1, [duration, segments]);
   const allWords = useMemo(() => segments.flatMap((s, i) => segWords(s, i)), [segments]);
@@ -510,6 +588,7 @@ export default function EditorPage() {
   const totalDurRef = useRef(1); useEffect(() => { totalDurRef.current = totalDur; }, [totalDur]);
   const activeRef = useRef(-1);
   const liveElRef = useRef<HTMLElement | null>(null);
+  const hadFrameRef = useRef(false);
 
   /* Only the slice of the timeline that is on screen is mounted. A 10-minute
      video is ~2 000 word blocks; mounting them all cost tens of milliseconds
@@ -689,9 +768,66 @@ export default function EditorPage() {
     toast.success(next ? 'AI enhancement active' : 'Original audio');
   };
 
+  /* ── selection ──
+     Plain click selects one caption. Shift-click extends from the anchor so a
+     whole run can be picked in one gesture; Ctrl/Cmd-click toggles a single
+     caption in or out of the selection. */
+  const selectLine = (i: number, e?: { shiftKey?: boolean; ctrlKey?: boolean; metaKey?: boolean }) => {
+    const additive = !!(e?.ctrlKey || e?.metaKey);
+    const range = !!e?.shiftKey;
+    setSelWords(new Set());
+    if (range && selAnchorRef.current >= 0) {
+      const a = Math.min(selAnchorRef.current, i), b = Math.max(selAnchorRef.current, i);
+      const next = new Set<number>();
+      for (let x = a; x <= b; x++) next.add(x);
+      setSelLines(next);
+      setSelLine(i);
+      return;
+    }
+    if (additive) {
+      setSelLines((prev) => {
+        const next = new Set(prev);
+        if (next.has(i)) next.delete(i); else next.add(i);
+        return next;
+      });
+      selAnchorRef.current = i;
+      setSelLine(i);
+      return;
+    }
+    selAnchorRef.current = i;
+    setSelLines(new Set([i]));
+    setSelLine(i);
+  };
+  /** Caret moved into a caption's text field: make it the primary line, but
+      leave any existing multi-selection alone. */
+  const focusLine = (i: number) => {
+    setSelLine(i);
+    setSelWords(new Set());
+    setSelLines((prev) => (prev.size ? prev : new Set([i])));
+    if (selAnchorRef.current < 0) selAnchorRef.current = i;
+  };
+  const clearSel = () => { setSelLines(new Set()); setSelLine(-1); selAnchorRef.current = -1; };
+  clearSelRef.current = clearSel;
+  const selectAllLines = () => {
+    setSelLines(new Set(segments.map((_, i) => i)));
+    selAnchorRef.current = 0;
+    setSelLine(segments.length ? 0 : -1);
+  };
+  selectAllRef.current = selectAllLines;
+
   /* ── edits ── */
   const updateText = (i: number, text: string) => { setSegments((p) => p.map((s, x) => (x === i ? { ...s, text } : s))); markDirty(); };
-  const removeSeg = (i: number) => { setSegments((p) => p.filter((_, x) => x !== i)); markDirty(); };
+  const removeSeg = (i: number) => { setSegments((p) => p.filter((_, x) => x !== i)); markDirty(); clearSel(); };
+  /** Delete every selected caption at once. */
+  const removeSelected = () => {
+    const kill = selLines.size ? selLines : (selLine >= 0 ? new Set([selLine]) : new Set<number>());
+    if (!kill.size) { toast('Select one or more captions first', { icon: 'ℹ️' }); return; }
+    const n = kill.size;
+    setSegments((p) => p.filter((_, x) => !kill.has(x)));
+    markDirty(); clearSel();
+    toast.success(`Deleted ${n} caption${n === 1 ? '' : 's'}`);
+  };
+  removeSelectedRef.current = removeSelected;
   const addLine = () => { const t = currentRef.current; const s: Seg = { id: Date.now(), start: t, end: Math.min(totalDur, t + 2), text: 'New caption' }; setSegments((p) => [...p, s].sort((a, b) => a.start - b.start)); markDirty(); };
 
   const patchGlobal = (p: Partial<CapStyle>) => { setStyle((s) => ({ ...s, ...p })); markDirty(); };
@@ -732,8 +868,13 @@ export default function EditorPage() {
 
   /* ── caption tools ── */
   const applySplit = () => {
-    setSegments((p) => p.flatMap((s) => (wordsPer === 'chars' ? splitSeg(s, maxChars, lineCount) : splitSegWords(s, Number(wordsPer)))));
-    markDirty(); toast.success('Captions re-split');
+    setSegments((p) => p.flatMap((s) => (wordsPer === 'chars'
+      ? splitSeg(s, maxChars, lineCount)
+      : splitSegWords(s, Number(wordsPer), lineCount))));
+    markDirty();
+    toast.success(lineCount > 1
+      ? `Captions re-split · ${lineCount} lines`
+      : 'Captions re-split');
   };
   const rmPunct = () => { setSegments((p) => p.map((s) => ({ ...s, text: s.text.replace(/[.,!?;:"“”‘’—–]/g, '').replace(/\s+/g, ' ').trim() }))); markDirty(); toast.success('Punctuation removed'); };
   const rmEmph = () => { setWordStyles({}); markDirty(); toast.success('Emphasis removed'); };
@@ -787,7 +928,11 @@ export default function EditorPage() {
   /* ── canvas renderer (burns per-word styles + emphasis) ── */
   const drawFrame = (ctx: CanvasRenderingContext2D, W: number, H: number, t: number) => {
     const v = videoRef.current;
-    if (v && v.readyState >= 2) ctx.drawImage(v, 0, 0, W, H); else { ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H); }
+    /* Only clear to black if we have never had a frame — otherwise hold the
+       previous one. Painting black whenever readyState dips is what put a
+       black leader at the head of every exported file. */
+    if (v && v.readyState >= 2) { ctx.drawImage(v, 0, 0, W, H); hadFrameRef.current = true; }
+    else if (!hadFrameRef.current) { ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H); }
     const si = segments.findIndex((s) => t >= s.start && t <= s.end);
     if (si < 0) return;
     const seg = segments[si]; const st = effLine(si);
@@ -832,11 +977,19 @@ export default function EditorPage() {
       return { text, fs, font, color: c1, grad: useGrad ? [c1, c2] as [string, string] : undefined, underline, w, tw, spot: em && sw.emphasisMode === 'spotlight' ? c1 : undefined, anim };
     });
 
-    /* wrap tokens into rows */
+    /* Lay tokens out into rows. A caption split with the "Lines" control comes
+       with its own row count, which we honour first; each of those rows is then
+       still width-wrapped if it would overflow the caption box. */
     const maxW = W * ((st.boxWidth ?? 92) / 100);
-    const rows: Tok[][] = []; let row: Tok[] = []; let rw = 0;
-    for (const tok of toks) { if (rw + tok.w > maxW && row.length) { rows.push(row); row = [tok]; rw = tok.w; } else { row.push(tok); rw += tok.w; } }
-    if (row.length) rows.push(row);
+    const rows: Tok[][] = [];
+    for (const group of rowsOf(toks, seg.lines || 1)) {
+      let row: Tok[] = []; let rw = 0;
+      for (const tok of group) {
+        if (rw + tok.w > maxW && row.length) { rows.push(row); row = [tok]; rw = tok.w; }
+        else { row.push(tok); rw += tok.w; }
+      }
+      if (row.length) rows.push(row);
+    }
 
     const lh = baseFs * Math.max(st.lineSpacing, 1.35);
     const blockH = rows.length * lh;
@@ -953,7 +1106,18 @@ export default function EditorPage() {
       const done = new Promise<Blob>((res, rej) => { rec.onstop = () => res(new Blob(chunks, { type: isMp4 ? 'video/mp4' : 'video/webm' })); rec.onerror = () => rej(new Error('Recording failed')); });
       let raf = 0;
       const loop = () => { drawFrame(ctx, W, H, video.currentTime); setPct(Math.min(99, Math.round((video.currentTime / (video.duration || totalDur)) * 100))); raf = requestAnimationFrame(loop); };
-      rec.start(100); raf = requestAnimationFrame(loop); video.currentTime = 0; await video.play();
+      /* Rewind and wait until frame 0 is actually decoded BEFORE arming the
+         recorder. Previously recording began immediately and playback only
+         started once the seek finished, so the first few seconds of every
+         export were the blank canvas. */
+      video.pause();
+      await seekToFrame(video, 0);
+      drawFrame(ctx, W, H, 0);          // first recorded frame is a real one
+      setPct(0);
+
+      rec.start(100);
+      raf = requestAnimationFrame(loop);
+      await video.play();
       await new Promise<void>((r) => { const e = () => { video.removeEventListener('ended', e); r(); }; video.addEventListener('ended', e); });
       rec.stop(); cancelAnimationFrame(raf);
       const blob = await done; const u = URL.createObjectURL(blob);
@@ -1101,13 +1265,14 @@ export default function EditorPage() {
      with a data-attribute (see the effect near the timeline), so the rail is
      NOT rebuilt every time the active caption changes during playback. */
   const capRows = useMemo(() => filtered.map(({ s, i }) => {
-    const sel = i === selLine;
+    const sel = selLines.has(i) || i === selLine;
     return (
-      <div key={s.id} data-cap-row={i} onClick={() => { setSelLine(i); setSelWords(new Set()); seekTo(s.start); }}
+      <div key={s.id} data-cap-row={i} onClick={(e) => { selectLine(i, e); if (!e.shiftKey && !(e.ctrlKey || e.metaKey)) seekTo(s.start); }}
         className="cap-row group flex cursor-pointer items-center gap-3 rounded-2xl border px-3 py-3 transition"
         style={{ background: sel ? 'rgba(79,140,255,.10)' : 'transparent', borderColor: sel ? 'var(--accent)' : 'transparent' }}>
         <span className="cap-row-badge grid h-7 w-7 shrink-0 place-items-center rounded-full text-[11px] font-bold">{i + 1}</span>
-        <input value={shown(s)} onChange={(e) => updateText(i, e.target.value)} onFocus={() => { setSelLine(i); setSelWords(new Set()); }}
+        <input value={shown(s)} onChange={(e) => updateText(i, e.target.value)} onFocus={() => focusLine(i)}
+          onMouseDown={(e) => { if (e.shiftKey || e.ctrlKey || e.metaKey) e.preventDefault(); }}
           className="flex-1 bg-transparent text-[15px] outline-none" style={{ fontFamily: withScript("'Inter',sans-serif") }} />
         <button onClick={(e) => { e.stopPropagation(); setLineStylingFor(i); setCollapsed((c) => ({ ...c, typo: true })); }}
           title="Line styling" className="shrink-0 rounded-md p-1.5 transition" style={{ color: 'var(--text-muted)' }}>
@@ -1117,14 +1282,14 @@ export default function EditorPage() {
       </div>
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }), [filtered, selLine, romanOn, romanMap]);
+  }), [filtered, selLine, selLines, romanOn, romanMap]);
 
   /* ── timeline blocks ── */
   const fitW = wrapBox.w && wrapBox.h ? Math.max(220, Math.min(wrapBox.w, wrapBox.h * vRatio)) : 640;
   const fitH = fitW / vRatio;
 
   const toggleWord = (key: string, additive: boolean) => {
-    setSelLine(-1);
+    setSelLine(-1); setSelLines(new Set());
     setSelWords((prev) => {
       const n = new Set(additive ? prev : []);
       if (prev.has(key) && additive) n.delete(key); else n.add(key);
@@ -1172,11 +1337,14 @@ export default function EditorPage() {
     };
     let raf = 0; let last: PointerEvent | null = null;
     const move = (ev: PointerEvent) => { last = ev; if (!raf) raf = requestAnimationFrame(() => { raf = 0; if (last) apply(last); }); };
-    const up = () => {
+    const up = (ev: PointerEvent) => {
       if (raf) cancelAnimationFrame(raf);
       window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up);
       if (moved) markDirty();
-      else { setSelLine(i); setSelWords(new Set()); seekTo(segments[i].start); }
+      else {
+        selectLine(i, ev);
+        if (!ev.shiftKey && !(ev.ctrlKey || ev.metaKey)) seekTo(segments[i].start);
+      }
     };
     window.addEventListener('pointermove', move); window.addEventListener('pointerup', up);
   };
@@ -1211,7 +1379,7 @@ export default function EditorPage() {
       .map((s, i) => ({ s, i }))
       .filter(({ s }) => s.end >= from && s.start <= to)
       .map(({ s, i }) => {
-        const sel = i === selLine;
+        const sel = selLines.has(i) || i === selLine;
         return (
           <div key={s.id} data-tl-seg={i} onClick={(e) => e.stopPropagation()}
             className="tl-seg absolute top-3 flex items-stretch rounded-lg text-[10px] font-semibold" title={s.text}
@@ -1225,7 +1393,7 @@ export default function EditorPage() {
         );
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tlMode, tlWindow, allWords, segments, pxPerSec, selWords, selLine, wordStyles, romanOn, romanMap, totalDur]);
+  }, [tlMode, tlWindow, allWords, segments, pxPerSec, selWords, selLine, selLines, wordStyles, romanOn, romanMap, totalDur]);
 
   /* keep the imperative "active caption" highlight in sync with activeIdx */
   useEffect(() => {
@@ -1318,14 +1486,16 @@ export default function EditorPage() {
     <div className="surface absolute left-3 right-3 top-[92px] z-40 max-h-[70vh] overflow-y-auto p-4 shadow-2xl editor-scroll" style={{ background: 'var(--editor-surface)', borderColor: 'var(--editor-border)' }}>
       <p className="mb-3 text-center text-[10px] font-bold uppercase tracking-widest" style={{ color: 'var(--text-muted)' }}>Display Settings</p>
       <div className="grid grid-cols-3 gap-2">
-        <div><label className="mb-1 block text-[10px] font-semibold" style={{ color: 'var(--text-muted)' }}>Words</label>
-          <select className="input !py-2 text-xs" value={wordsPer} onChange={(e) => setWordsPer(e.target.value as any)}><option value="1">1 word</option><option value="2">2 words</option><option value="3">3 words</option><option value="chars">By chars</option></select></div>
+        <div><label className="mb-1 block text-[10px] font-semibold" style={{ color: 'var(--text-muted)' }}>Words / Line</label>
+          <select className="input !py-2 text-xs" value={wordsPer} onChange={(e) => setWordsPer(e.target.value as any)}><option value="1">1 Word</option><option value="2">2 Words</option><option value="3">3 Words</option><option value="chars">By Chars</option></select></div>
         <div><label className="mb-1 block text-[10px] font-semibold" style={{ color: 'var(--text-muted)' }}>Max Chars</label>
           <input type="number" className="input !py-2 text-xs" value={maxChars} onChange={(e) => setMaxChars(Math.max(6, Number(e.target.value)))} /></div>
         <div><label className="mb-1 block text-[10px] font-semibold" style={{ color: 'var(--text-muted)' }}>Lines</label>
           <select className="input !py-2 text-xs" value={lineCount} onChange={(e) => setLineCount(Number(e.target.value))}><option value={1}>1 Line</option><option value={2}>2 Lines</option></select></div>
       </div>
-      <button onClick={applySplit} className="btn-primary mt-3 w-full !py-2 text-xs">Apply split{wordsPer === 'chars' ? ` (${maxChars} × ${lineCount})` : ` (${wordsPer} word${wordsPer === '1' ? '' : 's'})`}</button>
+      <button onClick={applySplit} className="btn-primary mt-3 w-full !py-2 text-xs">
+        Apply split ({wordsPer === 'chars' ? `${maxChars} chars` : `${wordsPer} word${wordsPer === '1' ? '' : 's'}`} × {lineCount} line{lineCount === 1 ? '' : 's'})
+      </button>
 
       <p className="mb-2 mt-5 text-center text-[10px] font-bold uppercase tracking-widest" style={{ color: 'var(--text-muted)' }}>Actions</p>
       <div className="space-y-2">
@@ -1358,7 +1528,7 @@ export default function EditorPage() {
           style={{ background: 'var(--editor-surface)', borderColor: 'var(--editor-border)' }} onClick={(e) => e.stopPropagation()}>
           <div className="flex items-center justify-between border-b px-4 py-3" style={{ borderColor: 'var(--editor-border)' }}>
             <span className="flex items-center gap-2 text-sm font-bold"><LayoutGrid size={16} style={{ color: 'var(--accent)' }} /> LINE STYLING</span>
-            <span className="rounded-full px-3 py-1 text-[11px] font-semibold" style={{ background: 'var(--editor-panel)', color: 'var(--text-muted)' }}>Line {i + 1}</span>
+            <span className="rounded-md px-3 py-1 text-[11px] font-semibold" style={{ background: 'var(--editor-panel)', color: 'var(--text-muted)' }}>Line {i + 1}</span>
           </div>
 
           <button onClick={() => setCollapsed((c) => ({ ...c, typo: !c.typo }))} className="flex w-full items-center gap-2 border-b px-4 py-3 text-[11px] font-bold uppercase tracking-widest" style={{ borderColor: 'var(--editor-border)', color: 'var(--text-muted)' }}>
@@ -1421,7 +1591,7 @@ export default function EditorPage() {
         <h2 className="text-xl font-extrabold">Captions</h2>
         <div className="flex items-center gap-2">
           <button className="grid h-9 w-9 place-items-center rounded-full" style={{ background: 'var(--editor-panel)' }}><Search size={15} /></button>
-          <button onClick={() => setShowTools((v) => !v)} className="flex items-center gap-2 rounded-full px-3 py-2 text-sm font-semibold" style={{ background: 'var(--editor-panel)', color: showTools ? 'var(--accent)' : 'var(--text)' }}>
+          <button onClick={() => setShowTools((v) => !v)} className="flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold" style={{ background: 'var(--editor-panel)', color: showTools ? 'var(--accent)' : 'var(--text)' }}>
             <Settings2 size={14} style={{ color: 'var(--accent)' }} /> Caption Tools <ChevronDown size={13} style={{ transform: showTools ? 'rotate(180deg)' : 'none' }} />
           </button>
         </div>
@@ -1429,6 +1599,20 @@ export default function EditorPage() {
       <div className="px-4 pb-2 pt-3">
         <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search captions…" className="input !py-2 text-xs" />
       </div>
+      {selLines.size > 0 ? (
+        <div className="mx-3 mb-2 flex items-center gap-2 rounded-xl px-3 py-2" style={{ background: 'rgba(79,140,255,.12)', border: '1px solid var(--accent)' }}>
+          <span className="text-xs font-semibold">{selLines.size} selected</span>
+          <button onClick={selectAllLines} className="text-xs font-semibold" style={{ color: 'var(--accent)' }}>Select all</button>
+          <div className="flex-1" />
+          <button onClick={clearSel} className="text-xs" style={{ color: 'var(--text-muted)' }}>Clear</button>
+          <button onClick={removeSelected} className="flex items-center gap-1 rounded-lg px-2.5 py-1 text-xs font-semibold"
+            style={{ background: '#ef4444', color: '#fff' }}><Trash2 size={12} /> Delete</button>
+        </div>
+      ) : (
+        <p className="px-4 pb-2 text-[10px]" style={{ color: 'var(--text-muted)' }}>
+          Tip: Shift-click to select a range, Ctrl/Cmd-click to add one, then Delete.
+        </p>
+      )}
       {showTools && ToolsPanel}
       <div className="editor-scroll min-h-0 flex-1 space-y-1 overflow-y-auto px-3 pb-4">
         {capRows}
@@ -1808,14 +1992,18 @@ export default function EditorPage() {
                   <span className="grid h-16 w-16 place-items-center rounded-full" style={{ background: 'var(--accent)', color: '#fff', boxShadow: '0 10px 32px rgba(0,0,0,.45)' }}><Play size={26} className="ml-1" /></span>
                 </button>
               )}
-              <div className="absolute left-3 top-3"><span className="flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-semibold" style={{ background: 'rgba(0,0,0,.55)', color: '#fff' }}><RotateCcw size={12} /> Replace</span></div>
-              <div className="absolute right-3 top-3"><span className="rounded-full px-3 py-1 text-xs font-semibold" style={{ background: 'rgba(0,0,0,.55)', color: '#f5b74f' }}>● Low-res</span></div>
+              <div className="absolute left-3 top-3"><span className="flex items-center gap-1.5 rounded-md px-3 py-1 text-xs font-semibold" style={{ background: 'rgba(0,0,0,.55)', color: '#fff' }}><RotateCcw size={12} /> Replace</span></div>
+              <div className="absolute right-3 top-3"><span className="rounded-md px-3 py-1 text-xs font-semibold" style={{ background: 'rgba(0,0,0,.55)', color: '#f5b74f' }}>● Low-res</span></div>
               <PerfHud videoRef={videoRef} segments={segments.length} />
 
               {activeSeg && activeWords.length > 0 && (
                 <div key={`${activeIdx}-${lineSt.transition}-${bump}`} style={overlayWrap} onPointerDown={onCapPointerDown} title="Drag to reposition">
                   <span className={lineAnim} style={{ ...boxStyle, animationDuration: `${animDur(lineSt, activeSeg, lineSt.transition)}s` }}>
-                    {activeWords.map((w) => {
+                    {rowsOf(activeWords, activeSeg.lines || 1).map((row, ri) => (
+                    <span key={`r${ri}`} style={(activeSeg.lines || 1) > 1
+                      ? { display: 'block', textAlign: lineSt.align }
+                      : { display: 'contents' }}>
+                    {row.map((w) => {
                       const ws = wordStyles[w.key] || {};
                       const wtr = (ws as any).wordTransition || style.wordTransition;
                       // Each word enters at its spoken moment within the caption.
@@ -1842,6 +2030,8 @@ export default function EditorPage() {
                         >{w.text}</span>
                       );
                     })}
+                    </span>
+                    ))}
                   </span>
                   {selLine === activeIdx && (
                     <>
@@ -1899,7 +2089,10 @@ export default function EditorPage() {
               <div className="mx-1 h-6 w-px" style={{ background: 'var(--editor-border)' }} />
               <button onClick={() => { const s = [...segments].reverse().find((x) => x.end < currentRef.current); if (s) seekTo(s.start); }} className="grid h-8 w-8 place-items-center rounded-lg" style={{ background: 'var(--editor-panel)' }}><ChevronLeft size={15} /></button>
               <button onClick={() => { const s = segments.find((x) => x.start > currentRef.current); if (s) seekTo(s.start); }} className="grid h-8 w-8 place-items-center rounded-lg" style={{ background: 'var(--editor-panel)' }}><ChevronRight size={15} /></button>
-              <button onClick={() => { if (selLine >= 0) removeSeg(selLine); }} className="grid h-8 w-8 place-items-center rounded-lg" style={{ background: 'var(--editor-panel)' }}><Trash2 size={15} /></button>
+              <button onClick={removeSelected} title={selLines.size > 1 ? `Delete ${selLines.size} captions` : 'Delete caption'}
+                className="flex h-8 items-center gap-1 rounded-lg px-2" style={{ background: 'var(--editor-panel)', color: selLines.size ? '#ef4444' : 'var(--text)' }}>
+                <Trash2 size={15} />{selLines.size > 1 && <span className="text-xs font-bold">{selLines.size}</span>}
+              </button>
               <div className="ml-auto flex items-center gap-2">
                 <button onClick={() => setPxPerSec((z) => Math.max(4, z - 8))} className="grid h-8 w-8 place-items-center rounded-lg" style={{ background: 'var(--editor-panel)' }}><ZoomOut size={15} /></button>
                 <input type="range" min={4} max={220} value={pxPerSec} onChange={(e) => setPxPerSec(Number(e.target.value))} className="w-28" />
