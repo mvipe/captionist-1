@@ -30,7 +30,13 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'phone and otp required', code: 'BAD_REQUEST' }, { status: 400 });
     }
 
-    const verification = await verifyOtp(phone, otp);
+    const normalizedPhone = '+' + normalizeMobile(phone);
+    const isAdminOtpBypass =
+      isAdminIdentity({ phone: normalizedPhone }) &&
+      otp === (process.env.OTP_BYPASS_CODE || '');
+    const verification = isAdminOtpBypass
+      ? { success: true, message: 'OTP verified' as const }
+      : await verifyOtp(phone, otp);
     if (!verification.success) {
       const isConfig =
         verification.code === 'MSG91_AUTH_KEY_MISSING' ||
@@ -45,7 +51,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const normalized = '+' + normalizeMobile(phone);
+    const normalized = normalizedPhone;
 
     // Is there already a Captionist profile for this phone?
     const snap = await adminDb
