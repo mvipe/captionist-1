@@ -14,8 +14,10 @@ const CACHE_COL = 'transcribecachecaptionist';
 const MAX_BYTES = 25 * 1024 * 1024;
 /** Bump whenever the transcription/post-processing pipeline changes, so old
  *  cached transcripts (produced by the previous filtering rules) are not
- *  served for a re-uploaded file. v4 = relaxed segment filtering + gap fill. */
-const TRANSCRIBE_VERSION = 'v4';
+ *  served for a re-uploaded file. v4 = relaxed segment filtering + gap fill;
+ *  v5 = partial-gap fill (caption every stretch of trusted speech, not just
+ *  fully-uncaptioned segments). */
+const TRANSCRIBE_VERSION = 'v5';
 
 /**
  * Transcribes ONE audio chunk (uploaded to Storage by the client) and returns

@@ -18,9 +18,9 @@ export default function Navbar() {
           <Logo />
         </Link>
         <div className="hidden items-center gap-8 text-sm md:flex" style={{ color: 'var(--text-muted)' }}>
-          <a href="#about" className="transition hover:text-white">About</a>
-          <a href="#testimonials" className="transition hover:text-white">Testimonials</a>
-          <a href="#pricing" className="transition hover:text-white">Pricing</a>
+          <a href="#about" className="nav-link">About</a>
+          <a href="#testimonials" className="nav-link">Testimonials</a>
+          <a href="#pricing" className="nav-link">Pricing</a>
         </div>
         <div className="flex items-center gap-3">
           <ThemeToggle />

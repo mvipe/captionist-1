@@ -59,6 +59,50 @@ export const LANGUAGES = [
   'Bengali', 'Punjabi', 'Telugu', 'Sindhi', 'Marathi', 'Kannada', 'Pashto', 'Malay',
 ];
 
+/**
+ * Landing "Select your Language" demo videos.
+ *
+ * `single` = one clip (no Native/Roman toggle). Otherwise `native` + `roman`.
+ * These paths are the bundled fallbacks that ship in /public/videos. An admin can
+ * override any of them, or add a whole new language, from the panel
+ * (Content → Landing Videos, section = "language"); getLandingContent() overlays
+ * the admin entries on top of these. Only languages that actually have a video
+ * appear on the landing page.
+ */
+export interface DemoLanguage {
+  name: string;
+  native?: string;
+  roman?: string;
+  single?: string;
+}
+
+export const DEMO_LANGUAGES: DemoLanguage[] = [
+  { name: 'Hindi', native: '/videos/hindi-landing-native.mp4', roman: '/videos/hindi-landing-roman.mp4' },
+  { name: 'English', single: '/videos/english-landing.mp4' },
+  { name: 'Urdu', native: '/videos/urdu-landing-native.mp4', roman: '/videos/urdu-landing-roman.mp4' },
+  { name: 'Punjabi', native: '/videos/punjabi-landing-native.mp4', roman: '/videos/punjabi-landing-roman.mp4' },
+  { name: 'Gujarati', native: '/videos/gujarati-landing-native.mp4', roman: '/videos/gujarati-landing-roman.mp4' },
+  { name: 'Marathi', native: '/videos/marathi-landing-native.mp4', roman: '/videos/marathi-landing-roman.mp4' },
+  { name: 'Bengali', single: '/videos/bengali-landing.mp4' },
+  { name: 'Nepali', native: '/videos/nepali-landing-native.mp4', roman: '/videos/nepali-landing-roman.mp4' },
+  { name: 'Tamil', native: '/videos/tamil-landing-native.mp4', roman: '/videos/tamil-landing-roman.mp4' },
+];
+
+/** "All your Favourite Templates" showcase cards. */
+export interface TemplateVideo {
+  title: string;
+  videoUrl: string;
+  posterUrl?: string;
+}
+
+// The Templates section shows the 9 language demos by default — one card per
+// language. Admin can change/remove/replace any of them in the panel
+// (Content → Landing Videos, section = "templates").
+export const DEFAULT_TEMPLATE_VIDEOS: TemplateVideo[] = DEMO_LANGUAGES.map((l) => ({
+  title: l.name,
+  videoUrl: (l.native ?? l.single)!,
+}));
+
 export const FAQ_ITEMS = [
   {
     q: 'How accurate is the transcription?',

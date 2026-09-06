@@ -245,11 +245,24 @@ function groupWords(
   return out;
 }
 
+/** Normalise a word for comparison (drop case + punctuation incl. Devanagari danda). */
+const normWord = (w: string) =>
+  w.toLowerCase().replace(/[.!?,;:।"'`~(){}\[\]<>+\-*/\\|@#%^&=…“”‘’]/g, '').trim();
+
 /**
- * Fill silent-looking holes: if the trusted segment list covers speech that the
- * word-level pass dropped (or vice-versa), make sure nothing audible is left
- * without a caption. Any kept segment with no caption overlapping it at all is
- * re-added, split into short chunks.
+ * Fill silent-looking holes so that EVERY stretch of trusted speech carries a
+ * caption. groupWords (real word timestamps) is the primary source, but Whisper
+ * routinely omits word-level timings for quiet, fast, music-covered or accented
+ * speech while STILL reporting those words in its segment text. The old version
+ * only rescued a segment that had NO caption overlapping it at all — so a segment
+ * that was merely *partly* captioned kept its uncaptioned middle/end silent. That
+ * is the "video has voice but no caption" bug.
+ *
+ * We now inspect each trusted (`kept`) segment: find the time holes not covered by
+ * any caption, work out which of the segment's OWN words are still missing, and
+ * drop just those words into the holes. Placing only the not-yet-captioned words
+ * means we never duplicate what groupWords already produced, and a real pause
+ * (hole present but no missing words) is left untouched.
  */
 function fillGaps(
   captions: Array<{ start: number; end: number; text: string }>,
@@ -257,26 +270,78 @@ function fillGaps(
   maxWords = 3
 ): Array<{ start: number; end: number; text: string }> {
   if (!kept.length) return captions;
-  const covered = (a: number, b: number) =>
-    captions.some((c) => Math.min(c.end, b) - Math.max(c.start, a) > Math.min(0.25, (b - a) * 0.5));
+  const MIN_HOLE = 0.4; // shortest uncaptioned gap (s) worth filling
+  const PAD = 0.08;     // count a caption as covering a hair beyond its bounds
   const extra: Array<{ start: number; end: number; text: string }> = [];
+
   for (const s of kept) {
-    if (s.end - s.start < 0.12) continue;
-    if (covered(s.start, s.end)) continue;
-    // Not captioned anywhere — split this segment's text across its duration.
+    const segDur = s.end - s.start;
+    if (segDur < 0.12) continue;
     const words = s.text.split(/\s+/).filter(Boolean);
     if (!words.length) continue;
-    const dur = s.end - s.start;
-    const totalChars = words.reduce((a, w) => a + w.length, 0) || 1;
-    let t = s.start;
-    for (let i = 0; i < words.length; i += maxWords) {
-      const chunk = words.slice(i, i + maxWords);
-      const chars = chunk.reduce((a, w) => a + w.length, 0);
-      const sl = (chars / totalChars) * dur;
-      extra.push({ start: t, end: Math.min(s.end, t + sl), text: chunk.join(' ') });
-      t += sl;
+
+    // Captions overlapping this segment, clipped to it and padded a touch.
+    const overlapping = captions
+      .filter((c) => c.end > s.start && c.start < s.end)
+      .map((c) => ({
+        start: Math.max(s.start, c.start - PAD),
+        end: Math.min(s.end, c.end + PAD),
+        text: c.text,
+      }))
+      .sort((a, b) => a.start - b.start);
+
+    // Walk left→right collecting the gaps between covered spans.
+    const holes: Array<{ start: number; end: number }> = [];
+    let cursor = s.start;
+    for (const c of overlapping) {
+      if (c.start > cursor + MIN_HOLE) holes.push({ start: cursor, end: c.start });
+      cursor = Math.max(cursor, c.end);
+    }
+    if (s.end > cursor + MIN_HOLE) holes.push({ start: cursor, end: s.end });
+    if (!holes.length) continue; // speech already captioned across its whole span
+
+    // Multiset difference: which of the segment's words aren't captioned yet?
+    const have = new Map<string, number>();
+    for (const c of overlapping)
+      for (const w of c.text.split(/\s+/)) {
+        const n = normWord(w);
+        if (n) have.set(n, (have.get(n) || 0) + 1);
+      }
+    const missing: string[] = [];
+    for (const w of words) {
+      const n = normWord(w);
+      const c = have.get(n) || 0;
+      if (n && c > 0) have.set(n, c - 1); // this word is already on screen — consume it
+      else missing.push(w);               // audible but uncaptioned
+    }
+    if (!missing.length) continue; // the hole is a genuine pause, not dropped speech
+
+    // Spread the missing words across the holes, weighted by hole length, timing
+    // each chunk within its hole in proportion to its characters.
+    const totalHole = holes.reduce((a, h) => a + (h.end - h.start), 0) || 1;
+    let wi = 0;
+    for (let hIdx = 0; hIdx < holes.length && wi < missing.length; hIdx++) {
+      const h = holes[hIdx];
+      const target =
+        hIdx === holes.length - 1
+          ? missing.length - wi
+          : Math.max(1, Math.round((missing.length * (h.end - h.start)) / totalHole));
+      const slice = missing.slice(wi, wi + target);
+      wi += slice.length;
+      if (!slice.length) continue;
+      const hDur = h.end - h.start;
+      const totalChars = slice.reduce((a, w) => a + w.length, 0) || 1;
+      let t = h.start;
+      for (let i = 0; i < slice.length; i += maxWords) {
+        const chunk = slice.slice(i, i + maxWords);
+        const chars = chunk.reduce((a, w) => a + w.length, 0);
+        const sl = (chars / totalChars) * hDur;
+        extra.push({ start: t, end: Math.min(h.end, t + sl), text: chunk.join(' ') });
+        t += sl;
+      }
     }
   }
+
   if (!extra.length) return captions;
   return [...captions, ...extra].sort((a, b) => a.start - b.start);
 }
